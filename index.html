@@ -1,0 +1,925 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>콕패스 관리자</title>
+<style>
+  :root{
+    --bg:#f5f4f1; --card:#ffffff; --border:rgba(20,20,20,.10);
+    --text:#1c1c1e; --text2:#6b6b6f; --text3:#9b9b9f;
+    --gold:#b8912f; --gold-dark:#8f701f; --navy:#12203a; --navy2:#1b3054;
+    --green:#0f9d68; --amber:#b56a00; --red:#dc3545; --blue:#2f6fe0;
+    --radius:10px;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:"Pretendard","-apple-system",BlinkMacSystemFont,sans-serif;background:var(--bg);color:var(--text);font-size:14px;}
+  a{color:inherit;text-decoration:none;}
+  button{font-family:inherit;cursor:pointer;}
+  input,select,textarea{font-family:inherit;font-size:13px;}
+
+  /* ── 로그인 화면 ───────────────────────── */
+  #loginScreen{min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(160deg,var(--navy),var(--navy2));}
+  .login-card{background:#fff;border-radius:16px;padding:40px 36px;width:340px;box-shadow:0 20px 60px rgba(0,0,0,.35);}
+  .login-logo{font-size:22px;font-weight:800;color:var(--navy);margin-bottom:4px;}
+  .login-logo span{color:var(--gold);}
+  .login-sub{font-size:12px;color:var(--text3);margin-bottom:24px;}
+  .login-card label{display:block;font-size:12px;color:var(--text2);margin:14px 0 6px;}
+  .login-card input{width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;}
+  .login-card button{width:100%;margin-top:22px;padding:11px;border:none;border-radius:8px;background:var(--gold);color:#fff;font-weight:700;font-size:14px;}
+  .login-card button:hover{background:var(--gold-dark);}
+  .login-error{margin-top:12px;font-size:12px;color:var(--red);min-height:14px;}
+
+  /* ── 레이아웃 ───────────────────────── */
+  #app{display:none;}
+  #sidebar{position:fixed;top:0;left:0;bottom:0;width:220px;background:var(--navy);color:#cdd6e6;padding:20px 0;overflow-y:auto;}
+  .sb-logo{padding:0 20px 20px;font-size:18px;font-weight:800;color:#fff;border-bottom:1px solid rgba(255,255,255,.08);margin-bottom:10px;}
+  .sb-logo span{color:var(--gold);}
+  .sb-group{padding:14px 20px 6px;font-size:10.5px;letter-spacing:.06em;color:#7688a8;text-transform:uppercase;}
+  .sb-item{display:flex;align-items:center;gap:8px;padding:9px 20px;font-size:13.5px;color:#cdd6e6;cursor:pointer;border-left:3px solid transparent;}
+  .sb-item:hover{background:rgba(255,255,255,.06);}
+  .sb-item.active{background:rgba(184,145,47,.16);border-left-color:var(--gold);color:#fff;font-weight:600;}
+
+  #content{margin-left:220px;min-height:100vh;}
+  #topbar{position:sticky;top:0;background:#fff;border-bottom:1px solid var(--border);padding:12px 26px;display:flex;justify-content:space-between;align-items:center;z-index:5;}
+  #topbar .title{font-size:16px;font-weight:700;}
+  #topbar .who{font-size:12.5px;color:var(--text2);display:flex;align-items:center;gap:10px;}
+  #topbar .who b{color:var(--text);}
+  #topbar .logout{color:var(--red);cursor:pointer;font-size:12.5px;}
+  #main{padding:22px 26px 60px;}
+
+  /* ── 공통 컴포넌트 ───────────────────────── */
+  .kpi-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;margin-bottom:22px;}
+  .kpi{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;border-top:3px solid var(--gold);}
+  .kpi .n{font-size:22px;font-weight:800;}
+  .kpi .l{font-size:12px;color:var(--text2);margin-top:2px;}
+
+  .panel{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:18px;margin-bottom:18px;}
+  .panel-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:8px;}
+  .panel-head h2{font-size:15px;margin:0;}
+  .toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
+  .toolbar input,.toolbar select{padding:7px 10px;border:1px solid var(--border);border-radius:6px;}
+
+  .btn{padding:7px 13px;border-radius:6px;border:1px solid var(--border);background:#fff;font-size:12.5px;font-weight:600;color:var(--text);}
+  .btn:hover{background:#f4f4f4;}
+  .btn.primary{background:var(--gold);border-color:var(--gold);color:#fff;}
+  .btn.primary:hover{background:var(--gold-dark);}
+  .btn.danger{color:var(--red);border-color:rgba(220,53,69,.3);}
+  .btn.danger:hover{background:rgba(220,53,69,.08);}
+  .btn.small{padding:4px 9px;font-size:11.5px;}
+  .btn[disabled]{opacity:.45;cursor:not-allowed;}
+
+  table.dt{width:100%;border-collapse:collapse;font-size:12.8px;}
+  table.dt th{text-align:left;padding:9px 10px;color:var(--text2);border-bottom:1px solid var(--border);font-weight:600;white-space:nowrap;}
+  table.dt td{padding:9px 10px;border-bottom:1px solid var(--border);vertical-align:middle;}
+  table.dt tr:hover td{background:#faf9f6;}
+  .dt-wrap{overflow-x:auto;}
+
+  .badge{display:inline-block;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:700;}
+  .badge.gray{background:#eef0f3;color:var(--text2);}
+  .badge.green{background:rgba(15,157,104,.12);color:var(--green);}
+  .badge.amber{background:rgba(181,106,0,.12);color:var(--amber);}
+  .badge.red{background:rgba(220,53,69,.12);color:var(--red);}
+  .badge.blue{background:rgba(47,111,224,.12);color:var(--blue);}
+  .badge.gold{background:rgba(184,145,47,.14);color:var(--gold-dark);}
+
+  .empty{padding:30px;text-align:center;color:var(--text3);font-size:13px;}
+  .hint{font-size:11.5px;color:var(--text3);margin-top:6px;line-height:1.5;}
+
+  /* ── 모달 ───────────────────────── */
+  #modalOverlay{position:fixed;inset:0;background:rgba(10,14,24,.5);display:none;align-items:flex-start;justify-content:center;padding:5vh 16px;z-index:50;overflow-y:auto;}
+  .modal{background:#fff;border-radius:12px;width:100%;max-width:560px;padding:22px 24px;}
+  .modal h3{margin:0 0 16px;font-size:16px;}
+  .modal .field{margin-bottom:12px;}
+  .modal .field label{display:block;font-size:12px;color:var(--text2);margin-bottom:5px;}
+  .modal .field input,.modal .field select,.modal .field textarea{width:100%;padding:9px 11px;border:1px solid var(--border);border-radius:7px;}
+  .modal .field textarea{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;min-height:220px;}
+  .modal .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+  .modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px;}
+  .modal-err{color:var(--red);font-size:12px;margin-top:8px;min-height:14px;}
+
+  /* ── 토스트 ───────────────────────── */
+  #toast{position:fixed;bottom:22px;right:22px;background:var(--navy);color:#fff;padding:12px 18px;border-radius:8px;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.25);display:none;z-index:80;max-width:320px;}
+
+  @media (max-width:860px){
+    #sidebar{display:none;}
+    #content{margin-left:0;}
+  }
+</style>
+</head>
+<body>
+
+<!-- ══════════════ 로그인 화면 ══════════════ -->
+<div id="loginScreen">
+  <div class="login-card">
+    <div class="login-logo">콕<span>패스</span> 관리자</div>
+    <div class="login-sub">직원 계정으로 로그인하세요</div>
+    <label>이메일</label>
+    <input type="email" id="loginEmail" autocomplete="username" placeholder="you@kokpass.co.kr">
+    <label>비밀번호</label>
+    <input type="password" id="loginPassword" autocomplete="current-password" placeholder="••••••••">
+    <button id="loginBtn">로그인</button>
+    <div class="login-error" id="loginError"></div>
+  </div>
+</div>
+
+<!-- ══════════════ 메인 앱 ══════════════ -->
+<div id="app">
+  <div id="sidebar">
+    <div class="sb-logo">콕<span>패스</span></div>
+    <div class="sb-group">현황</div>
+    <div class="sb-item" data-tab="dashboard">대시보드</div>
+    <div class="sb-group">판매</div>
+    <div class="sb-item" data-tab="products">상품 관리</div>
+    <div class="sb-item" data-tab="channels">채널(폐쇄몰) 관리</div>
+    <div class="sb-item" data-tab="orders">주문 관리</div>
+    <div class="sb-item" data-tab="inventory">재고(PIN) 관리</div>
+    <div class="sb-group">회원</div>
+    <div class="sb-item" data-tab="members">회원 목록</div>
+    <div class="sb-group">설정</div>
+    <div class="sb-item" data-tab="myaccount">내 계정</div>
+    <div class="sb-item" id="staffNavItem" data-tab="staff">관리자 계정 관리</div>
+  </div>
+
+  <div id="content">
+    <div id="topbar">
+      <div class="title" id="pageTitle">대시보드</div>
+      <div class="who">
+        <span><b id="whoName">-</b> · <span id="whoRole">-</span></span>
+        <span class="logout" id="logoutBtn">로그아웃</span>
+      </div>
+    </div>
+    <div id="main"></div>
+  </div>
+</div>
+
+<div id="modalOverlay"><div class="modal" id="modalBox"></div></div>
+<div id="toast"></div>
+
+<script>
+"use strict";
+
+/* ════════════════════════════════════════════════════════════
+   설정 — 콕패스 전용 Supabase 프로젝트(okdahyvqhbqvfpvtpcip)
+   ════════════════════════════════════════════════════════════ */
+const SB_URL = "https://okdahyvqhbqvfpvtpcip.supabase.co";
+const SB_ANON_KEY = "sb_publishable_or8TBFpfxdJFC4MbC3PLrg_adM9L9h3";
+const SESSION_KEY = "kp_admin_session";
+
+let session = null;      // {access_token, refresh_token, expires_at, user}
+let me = null;            // {id, name, role}
+
+/* ── 세션 저장/복원 ─────────────────────────────────────── */
+function saveSession(){ localStorage.setItem(SESSION_KEY, JSON.stringify(session)); }
+function loadSession(){
+  try { const raw = localStorage.getItem(SESSION_KEY); return raw ? JSON.parse(raw) : null; }
+  catch { return null; }
+}
+function clearSession(){ session = null; me = null; localStorage.removeItem(SESSION_KEY); }
+
+/* ── 저수준 fetch 헬퍼 ─────────────────────────────────────
+   REST(PostgREST)·Auth(GoTrue)·Edge Function 세 종류 엔드포인트를
+   전부 이걸로 호출한다. 401을 만나면 refresh_token으로 한 번만
+   재시도한다. */
+async function sbFetch(path, { method = "GET", body, headers = {}, useAuth = true, retry = true } = {}) {
+  const h = { apikey: SB_ANON_KEY, "Content-Type": "application/json", ...headers };
+  if (useAuth && session) h.Authorization = "Bearer " + session.access_token;
+  else if (!useAuth) h.Authorization = "Bearer " + SB_ANON_KEY;
+
+  const res = await fetch(SB_URL + path, { method, headers: h, body: body !== undefined ? JSON.stringify(body) : undefined });
+
+  if (res.status === 401 && useAuth && retry && session?.refresh_token) {
+    const refreshed = await tryRefresh();
+    if (refreshed) return sbFetch(path, { method, body, headers, useAuth, retry: false });
+  }
+  return res;
+}
+
+async function tryRefresh() {
+  try {
+    const res = await fetch(`${SB_URL}/auth/v1/token?grant_type=refresh_token`, {
+      method: "POST",
+      headers: { apikey: SB_ANON_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: session.refresh_token }),
+    });
+    if (!res.ok) return false;
+    const data = await res.json();
+    session = { access_token: data.access_token, refresh_token: data.refresh_token,
+                expires_at: Math.floor(Date.now() / 1000) + data.expires_in, user: data.user };
+    saveSession();
+    return true;
+  } catch { return false; }
+}
+
+/* PostgREST 편의 함수 */
+async function restGet(table, query = "") {
+  const res = await sbFetch(`/rest/v1/${table}${query}`);
+  if (!res.ok) throw new Error(await extractErr(res));
+  return res.json();
+}
+async function restCount(table, query = "") {
+  const res = await sbFetch(`/rest/v1/${table}${query}${query.includes("?") ? "&" : "?"}select=id`, {
+    headers: { Prefer: "count=exact", Range: "0-0" },
+  });
+  if (!res.ok) return null;
+  const cr = res.headers.get("content-range"); // "0-0/123"
+  return cr ? parseInt(cr.split("/")[1], 10) : null;
+}
+async function restInsert(table, rows) {
+  const res = await sbFetch(`/rest/v1/${table}`, { method: "POST", body: rows, headers: { Prefer: "return=representation" } });
+  if (!res.ok) throw new Error(await extractErr(res));
+  return res.json();
+}
+async function restPatch(table, filterQuery, patchObj) {
+  const res = await sbFetch(`/rest/v1/${table}?${filterQuery}`, { method: "PATCH", body: patchObj, headers: { Prefer: "return=representation" } });
+  if (!res.ok) throw new Error(await extractErr(res));
+  return res.json();
+}
+async function restDelete(table, filterQuery) {
+  const res = await sbFetch(`/rest/v1/${table}?${filterQuery}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await extractErr(res));
+  return true;
+}
+async function extractErr(res) {
+  try { const j = await res.json(); return j.message || j.msg || j.error_description || JSON.stringify(j); }
+  catch { return `요청 실패 (HTTP ${res.status})`; }
+}
+
+/* ════════════════════════════════════════════════════════════
+   로그인 / 로그아웃
+   ════════════════════════════════════════════════════════════ */
+document.getElementById("loginBtn").addEventListener("click", doLogin);
+document.getElementById("loginPassword").addEventListener("keydown", e => { if (e.key === "Enter") doLogin(); });
+
+async function doLogin() {
+  const email = document.getElementById("loginEmail").value.trim();
+  const password = document.getElementById("loginPassword").value;
+  const errEl = document.getElementById("loginError");
+  errEl.textContent = "";
+  if (!email || !password) { errEl.textContent = "이메일과 비밀번호를 입력하세요."; return; }
+
+  const btn = document.getElementById("loginBtn");
+  btn.disabled = true; btn.textContent = "로그인 중...";
+  try {
+    const res = await fetch(`${SB_URL}/auth/v1/token?grant_type=password`, {
+      method: "POST",
+      headers: { apikey: SB_ANON_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error_description || data.msg || "로그인에 실패했습니다.");
+
+    session = { access_token: data.access_token, refresh_token: data.refresh_token,
+                expires_at: Math.floor(Date.now() / 1000) + data.expires_in, user: data.user };
+    saveSession();
+    await afterLogin();
+  } catch (e) {
+    errEl.textContent = e.message;
+  } finally {
+    btn.disabled = false; btn.textContent = "로그인";
+  }
+}
+
+async function afterLogin() {
+  // 로그인한 사용자가 staff 테이블에 등록된 활성 계정인지 확인 (RLS: 본인 행은 항상 조회 가능)
+  const rows = await restGet("staff", `?id=eq.${session.user.id}&select=id,name,role,active`);
+  const staffRow = rows[0];
+  if (!staffRow || !staffRow.active) {
+    clearSession();
+    document.getElementById("loginError").textContent = "관리자 계정이 아니거나 비활성화된 계정입니다.";
+    return;
+  }
+  me = staffRow;
+  document.getElementById("loginScreen").style.display = "none";
+  document.getElementById("app").style.display = "block";
+  document.getElementById("whoName").textContent = me.name;
+  document.getElementById("whoRole").textContent = me.role === "admin" ? "관리자" : "스태프";
+  document.getElementById("staffNavItem").style.display = me.role === "admin" ? "flex" : "none";
+  goTab("dashboard");
+}
+
+document.getElementById("logoutBtn").addEventListener("click", async () => {
+  try { await sbFetch("/auth/v1/logout", { method: "POST" }); } catch {}
+  clearSession();
+  location.reload();
+});
+
+/* 30분마다 세션 만료 임박 시 미리 갱신 */
+setInterval(() => {
+  if (session && session.expires_at - Math.floor(Date.now() / 1000) < 300) tryRefresh();
+}, 4 * 60 * 1000);
+
+/* ════════════════════════════════════════════════════════════
+   탭 네비게이션
+   ════════════════════════════════════════════════════════════ */
+const TAB_TITLES = {
+  dashboard: "대시보드", products: "상품 관리", channels: "채널(폐쇄몰) 관리",
+  orders: "주문 관리", inventory: "재고(PIN) 관리", members: "회원 목록",
+  myaccount: "내 계정", staff: "관리자 계정 관리",
+};
+const TAB_RENDERERS = {
+  dashboard: renderDashboard, products: renderProducts, channels: renderChannels,
+  orders: renderOrders, inventory: renderInventory, members: renderMembers,
+  myaccount: renderMyAccount, staff: renderStaff,
+};
+
+document.querySelectorAll(".sb-item").forEach(el => el.addEventListener("click", () => goTab(el.dataset.tab)));
+
+function goTab(tab) {
+  document.querySelectorAll(".sb-item").forEach(el => el.classList.toggle("active", el.dataset.tab === tab));
+  document.getElementById("pageTitle").textContent = TAB_TITLES[tab] || tab;
+  const main = document.getElementById("main");
+  main.innerHTML = `<div class="empty">불러오는 중...</div>`;
+  (TAB_RENDERERS[tab] || (() => { main.innerHTML = `<div class="empty">준비 중입니다.</div>`; }))();
+}
+
+/* ════════════════════════════════════════════════════════════
+   공통 UI 헬퍼
+   ════════════════════════════════════════════════════════════ */
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+function fmtWon(n) { return n == null ? "-" : Number(n).toLocaleString("ko-KR") + "원"; }
+function fmtDate(s) { if (!s) return "-"; return String(s).replace("T", " ").slice(0, 16); }
+
+function toast(msg, isErr = false) {
+  const el = document.getElementById("toast");
+  el.textContent = msg;
+  el.style.background = isErr ? "var(--red)" : "var(--navy)";
+  el.style.display = "block";
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { el.style.display = "none"; }, 3200);
+}
+
+function dtTable(headers, rowsHtml) {
+  return `<div class="dt-wrap"><table class="dt"><thead><tr>${headers.map(h => `<th>${h}</th>`).join("")}</tr></thead>
+    <tbody>${rowsHtml.length ? rowsHtml.join("") : `<tr><td colspan="${headers.length}"><div class="empty">데이터가 없습니다.</div></td></tr>`}</tbody></table></div>`;
+}
+
+function openModal(html) {
+  document.getElementById("modalBox").innerHTML = html;
+  document.getElementById("modalOverlay").style.display = "flex";
+}
+function closeModal() { document.getElementById("modalOverlay").style.display = "none"; }
+document.getElementById("modalOverlay").addEventListener("click", e => { if (e.target.id === "modalOverlay") closeModal(); });
+
+/* row(JSON 오브젝트)를 그대로 편집하는 범용 모달 — 세부 폼 대신 사용하는
+   "실무자용" 편집 방식. 스키마 그대로 노출되므로 정확하고 빠르게 확장 가능. */
+function openJsonEditModal({ title, table, pkCol, initial, onSaved, filterQuery, isInsert }) {
+  const editable = { ...initial };
+  delete editable.created_at; delete editable.updated_at;
+  if (!isInsert) delete editable[pkCol];
+  const json = JSON.stringify(editable, null, 2);
+  openModal(`
+    <h3>${esc(title)}</h3>
+    <div class="field">
+      <label>${isInsert ? "새 레코드 (JSON)" : `필드 편집 (JSON, ${pkCol} 제외)`}</label>
+      <textarea id="jsonEditArea">${esc(json)}</textarea>
+    </div>
+    <div class="modal-err" id="jsonEditErr"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">취소</button>
+      <button class="btn primary" id="jsonEditSaveBtn">저장</button>
+    </div>
+  `);
+  document.getElementById("jsonEditSaveBtn").addEventListener("click", async () => {
+    const errEl = document.getElementById("jsonEditErr");
+    let parsed;
+    try { parsed = JSON.parse(document.getElementById("jsonEditArea").value); }
+    catch { errEl.textContent = "JSON 형식이 올바르지 않습니다."; return; }
+    try {
+      if (isInsert) await restInsert(table, [parsed]);
+      else await restPatch(table, filterQuery, parsed);
+      closeModal();
+      toast("저장했습니다.");
+      onSaved && onSaved();
+    } catch (e) { errEl.textContent = e.message; }
+  });
+}
+
+/* ════════════════════════════════════════════════════════════
+   1. 대시보드
+   ════════════════════════════════════════════════════════════ */
+async function renderDashboard() {
+  const main = document.getElementById("main");
+  try {
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const [ordersToday, ordersPaidAll, pinAvail, pinSold, productsOn, channelsActive] = await Promise.all([
+      restCount("orders", `?created_at=gte.${todayStr}`),
+      restGet("orders", `?status=eq.paid&select=total_amount`),
+      restCount("pin_inventory", `?status=eq.available`),
+      restCount("pin_inventory", `?status=eq.sold`),
+      restCount("products", `?indiv_sale_enabled=eq.true`),
+      restCount("channels", `?active=eq.true`),
+    ]);
+    const paidTotal = ordersPaidAll.reduce((s, o) => s + (o.total_amount || 0), 0);
+    const recentOrders = await restGet("orders", `?select=id,buyer_name,total_amount,status,created_at&order=created_at.desc&limit=8`);
+
+    main.innerHTML = `
+      <div class="kpi-row">
+        <div class="kpi"><div class="n">${ordersToday ?? "-"}</div><div class="l">오늘 주문 건수</div></div>
+        <div class="kpi"><div class="n">${fmtWon(paidTotal)}</div><div class="l">누적 결제완료 매출</div></div>
+        <div class="kpi"><div class="n">${pinAvail ?? "-"}</div><div class="l">재고(PIN) 판매가능</div></div>
+        <div class="kpi"><div class="n">${pinSold ?? "-"}</div><div class="l">재고(PIN) 판매완료</div></div>
+        <div class="kpi"><div class="n">${productsOn ?? "-"}</div><div class="l">개인판매 활성 상품</div></div>
+        <div class="kpi"><div class="n">${channelsActive ?? "-"}</div><div class="l">활성 폐쇄몰 채널</div></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>최근 주문</h2></div>
+        ${dtTable(["주문ID", "구매자", "금액", "상태", "생성일시"], recentOrders.map(o => `
+          <tr><td>${esc(o.id)}</td><td>${esc(o.buyer_name)}</td><td>${fmtWon(o.total_amount)}</td>
+          <td>${statusBadge(o.status)}</td><td>${fmtDate(o.created_at)}</td></tr>`))}
+      </div>
+    `;
+  } catch (e) { main.innerHTML = `<div class="empty">불러오기 실패: ${esc(e.message)}</div>`; }
+}
+
+function statusBadge(status) {
+  const map = { paid: ["green", "결제완료"], pending: ["amber", "대기중"], refunded: ["red", "환불"], cancelled: ["gray", "취소"], failed: ["red", "실패"],
+                available: ["green", "판매가능"], sold: ["blue", "판매완료"], used: ["gold", "사용완료"] };
+  const [cls, label] = map[status] || ["gray", status || "-"];
+  return `<span class="badge ${cls}">${esc(label)}</span>`;
+}
+
+/* ════════════════════════════════════════════════════════════
+   2. 상품 관리
+   ════════════════════════════════════════════════════════════ */
+async function renderProducts() {
+  const main = document.getElementById("main");
+  main.innerHTML = `<div class="panel"><div class="panel-head"><h2>상품 목록</h2>
+    <div class="toolbar"><button class="btn primary" id="addProductBtn">+ 새 상품</button></div></div>
+    <div id="productsTableWrap"><div class="empty">불러오는 중...</div></div>
+    <div class="hint">"편집"은 해당 행의 모든 필드를 JSON으로 직접 수정합니다(tickets/features/tags 포함). id는 새 상품 생성 시에만 지정할 수 있습니다.</div>
+  </div>`;
+  document.getElementById("addProductBtn").addEventListener("click", () => {
+    openJsonEditModal({
+      title: "새 상품 추가", table: "products", pkCol: "id", isInsert: true,
+      initial: { id: "", name: "", vname: "", cat: "waterpark", emoji: "🎫", color: "#1B6B3A", gradient: "", tags: [], hot: false, visible: true, desc: "", tickets: [], features: [], sort_order: 0, image_url: "", indiv_price: 0, indiv_sale_enabled: false },
+      onSaved: loadProductsTable,
+    });
+  });
+  await loadProductsTable();
+}
+
+async function loadProductsTable() {
+  const wrap = document.getElementById("productsTableWrap");
+  try {
+    const rows = await restGet("products", "?select=*&order=sort_order.asc,id.asc");
+    wrap.innerHTML = dtTable(["ID", "상품명", "가격", "개인판매", "노출", "핫딜", "액션"], rows.map(p => `
+      <tr>
+        <td>${esc(p.id)}</td>
+        <td>${esc(p.name)}</td>
+        <td>${fmtWon(p.indiv_price)}</td>
+        <td>${boolBadge(p.indiv_sale_enabled)}</td>
+        <td>${boolBadge(p.visible)}</td>
+        <td>${boolBadge(p.hot)}</td>
+        <td>
+          <button class="btn small" data-act="toggle-sale" data-id="${esc(p.id)}" data-val="${!p.indiv_sale_enabled}">개인판매 ${p.indiv_sale_enabled ? "끄기" : "켜기"}</button>
+          <button class="btn small" data-act="edit" data-id="${esc(p.id)}">편집</button>
+        </td>
+      </tr>`));
+    wrap.querySelectorAll("[data-act=toggle-sale]").forEach(b => b.addEventListener("click", async () => {
+      try { await restPatch("products", `id=eq.${b.dataset.id}`, { indiv_sale_enabled: b.dataset.val === "true" }); toast("변경했습니다."); loadProductsTable(); }
+      catch (e) { toast(e.message, true); }
+    }));
+    wrap.querySelectorAll("[data-act=edit]").forEach(b => b.addEventListener("click", async () => {
+      const row = (await restGet("products", `?id=eq.${b.dataset.id}&select=*`))[0];
+      openJsonEditModal({ title: `상품 편집 — ${row.id}`, table: "products", pkCol: "id", filterQuery: `id=eq.${row.id}`, initial: row, onSaved: loadProductsTable });
+    }));
+  } catch (e) { wrap.innerHTML = `<div class="empty">불러오기 실패: ${esc(e.message)}</div>`; }
+}
+
+function boolBadge(v) { return v ? `<span class="badge green">ON</span>` : `<span class="badge gray">OFF</span>`; }
+
+/* ════════════════════════════════════════════════════════════
+   3. 채널(폐쇄몰) 관리
+   ════════════════════════════════════════════════════════════ */
+async function renderChannels() {
+  const main = document.getElementById("main");
+  main.innerHTML = `<div class="panel"><div class="panel-head"><h2>채널 목록</h2>
+    <div class="toolbar"><button class="btn primary" id="addChannelBtn">+ 새 채널</button></div></div>
+    <div id="channelsTableWrap"><div class="empty">불러오는 중...</div></div>
+    <div class="hint">정산/연락처 등 민감정보(채널 정산정보)는 관리자(admin) 계정에서만 조회·수정할 수 있습니다.
+    "노출상품"에서 이 채널에 어떤 상품을 얼마에 노출할지 관리합니다.</div>
+  </div>`;
+  document.getElementById("addChannelBtn").addEventListener("click", () => {
+    openJsonEditModal({
+      title: "새 채널 추가", table: "channels", pkCol: "id", isInsert: true,
+      initial: { id: "", slug: "", name: "", type: "closed_mall", access_mode: "public_link", active: true },
+      onSaved: loadChannelsTable,
+    });
+  });
+  await loadChannelsTable();
+}
+
+async function loadChannelsTable() {
+  const wrap = document.getElementById("channelsTableWrap");
+  try {
+    const rows = await restGet("channels", "?select=*&order=created_at.desc");
+    wrap.innerHTML = dtTable(["ID", "이름", "슬러그", "유형", "접근방식", "활성", "액션"], rows.map(c => `
+      <tr>
+        <td>${esc(c.id)}</td><td>${esc(c.name)}</td><td>${esc(c.slug)}</td><td>${esc(c.type)}</td><td>${esc(c.access_mode)}</td>
+        <td>${boolBadge(c.active)}</td>
+        <td>
+          <button class="btn small" data-act="edit" data-id="${esc(c.id)}">편집</button>
+          <button class="btn small" data-act="products" data-id="${esc(c.id)}">노출상품</button>
+          <button class="btn small" data-act="billing" data-id="${esc(c.id)}">정산정보</button>
+        </td>
+      </tr>`));
+    wrap.querySelectorAll("[data-act=edit]").forEach(b => b.addEventListener("click", async () => {
+      const row = (await restGet("channels", `?id=eq.${b.dataset.id}&select=*`))[0];
+      openJsonEditModal({ title: `채널 편집 — ${row.id}`, table: "channels", pkCol: "id", filterQuery: `id=eq.${row.id}`, initial: row, onSaved: loadChannelsTable });
+    }));
+    wrap.querySelectorAll("[data-act=billing]").forEach(b => b.addEventListener("click", () => openChannelBilling(b.dataset.id)));
+    wrap.querySelectorAll("[data-act=products]").forEach(b => b.addEventListener("click", () => openChannelProducts(b.dataset.id)));
+  } catch (e) { wrap.innerHTML = `<div class="empty">불러오기 실패: ${esc(e.message)}</div>`; }
+}
+
+async function openChannelBilling(channelId) {
+  let row;
+  try {
+    const rows = await restGet("channel_billing", `?channel_id=eq.${channelId}&select=*`);
+    row = rows[0] || { channel_id: channelId, invite_code: "", fee: 0, settle: "monthly", contact: "", phone: "", biz: "", address: "", note: "" };
+  } catch (e) { toast("정산정보 조회 실패(관리자 권한 필요): " + e.message, true); return; }
+  const isInsert = !row.channel_id || !(await restGet("channel_billing", `?channel_id=eq.${channelId}&select=channel_id`)).length;
+  openJsonEditModal({
+    title: `채널 정산정보 — ${channelId}`, table: "channel_billing", pkCol: "channel_id",
+    filterQuery: `channel_id=eq.${channelId}`, initial: row, isInsert, onSaved: () => toast("저장했습니다."),
+  });
+}
+
+async function openChannelProducts(channelId) {
+  const [links, products] = await Promise.all([
+    restGet("channel_products", `?channel_id=eq.${channelId}&select=*`),
+    restGet("products", "?select=id,name,indiv_price&order=id.asc"),
+  ]);
+  const byId = Object.fromEntries(links.map(l => [l.product_id, l]));
+  openModal(`
+    <h3>노출 상품 — ${esc(channelId)}</h3>
+    <div class="dt-wrap"><table class="dt"><thead><tr><th>노출</th><th>상품</th><th>기본가</th><th>이 채널 가격</th></tr></thead>
+    <tbody>${products.map(p => {
+      const l = byId[p.id];
+      return `<tr>
+        <td><input type="checkbox" data-cp-visible data-pid="${esc(p.id)}" ${l && l.visible ? "checked" : ""}></td>
+        <td>${esc(p.name)} <span class="hint">(${esc(p.id)})</span></td>
+        <td>${fmtWon(p.indiv_price)}</td>
+        <td><input type="number" data-cp-price data-pid="${esc(p.id)}" style="width:110px" placeholder="기본가 사용" value="${l && l.price_override != null ? l.price_override : ""}"></td>
+      </tr>`;
+    }).join("")}</tbody></table></div>
+    <div class="modal-err" id="cpErr"></div>
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">닫기</button><button class="btn primary" id="cpSaveBtn">저장</button></div>
+  `);
+  document.getElementById("cpSaveBtn").addEventListener("click", async () => {
+    const errEl = document.getElementById("cpErr");
+    try {
+      const rows = products.map(p => {
+        const visible = document.querySelector(`[data-cp-visible][data-pid="${p.id}"]`).checked;
+        const priceStr = document.querySelector(`[data-cp-price][data-pid="${p.id}"]`).value;
+        return { channel_id: channelId, product_id: p.id, visible, price_override: priceStr === "" ? null : Number(priceStr) };
+      });
+      const res = await sbFetch(`/rest/v1/channel_products`, {
+        method: "POST", body: rows,
+        headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+      });
+      if (!res.ok) throw new Error(await extractErr(res));
+      closeModal(); toast("노출 상품을 저장했습니다.");
+    } catch (e) { errEl.textContent = e.message; }
+  });
+}
+
+/* ════════════════════════════════════════════════════════════
+   4. 주문 관리
+   ════════════════════════════════════════════════════════════ */
+let ordersFilter = { status: "", q: "" };
+
+async function renderOrders() {
+  const main = document.getElementById("main");
+  main.innerHTML = `<div class="panel"><div class="panel-head"><h2>주문 목록</h2>
+    <div class="toolbar">
+      <select id="ordStatus">
+        <option value="">전체 상태</option>
+        <option value="pending">대기중</option><option value="paid">결제완료</option>
+        <option value="refunded">환불</option><option value="cancelled">취소</option><option value="failed">실패</option>
+      </select>
+      <input id="ordQ" placeholder="주문ID/구매자명/전화번호 검색" style="width:220px">
+      <button class="btn" id="ordSearchBtn">검색</button>
+    </div></div>
+    <div id="ordersTableWrap"><div class="empty">불러오는 중...</div></div>
+  </div>`;
+  document.getElementById("ordStatus").value = ordersFilter.status;
+  document.getElementById("ordQ").value = ordersFilter.q;
+  document.getElementById("ordSearchBtn").addEventListener("click", () => {
+    ordersFilter.status = document.getElementById("ordStatus").value;
+    ordersFilter.q = document.getElementById("ordQ").value.trim();
+    loadOrdersTable();
+  });
+  await loadOrdersTable();
+}
+
+async function loadOrdersTable() {
+  const wrap = document.getElementById("ordersTableWrap");
+  try {
+    let query = "?select=*&order=created_at.desc&limit=100";
+    if (ordersFilter.status) query += `&status=eq.${ordersFilter.status}`;
+    if (ordersFilter.q) {
+      const q = encodeURIComponent(ordersFilter.q);
+      query += `&or=(id.ilike.*${q}*,buyer_name.ilike.*${q}*,buyer_phone.ilike.*${q}*)`;
+    }
+    const rows = await restGet("orders", query);
+    wrap.innerHTML = dtTable(["주문ID", "채널", "상품", "구매자", "연락처", "금액", "상태", "생성일시", "액션"], rows.map(o => `
+      <tr>
+        <td>${esc(o.id)}</td><td>${esc(o.channel_id || "직접판매")}</td><td>${esc(o.product_id || "-")}</td>
+        <td>${esc(o.buyer_name)}</td><td>${esc(o.buyer_phone)}</td><td>${fmtWon(o.total_amount)}</td>
+        <td>${statusBadge(o.status)}</td><td>${fmtDate(o.created_at)}</td>
+        <td><button class="btn small" data-act="detail" data-id="${esc(o.id)}">상세/처리</button></td>
+      </tr>`));
+    wrap.querySelectorAll("[data-act=detail]").forEach(b => b.addEventListener("click", () => openOrderDetail(b.dataset.id)));
+  } catch (e) { wrap.innerHTML = `<div class="empty">불러오기 실패: ${esc(e.message)}</div>`; }
+}
+
+async function openOrderDetail(orderId) {
+  const [order, pins] = await Promise.all([
+    restGet("orders", `?id=eq.${orderId}&select=*`).then(r => r[0]),
+    restGet("pin_inventory", `?order_id=eq.${orderId}&select=id,pin_number,status,valid_from,valid_to`),
+  ]);
+  if (!order) { toast("주문을 찾을 수 없습니다.", true); return; }
+  openModal(`
+    <h3>주문 상세 — ${esc(order.id)}</h3>
+    <div class="field"><label>구매자 / 연락처</label><div>${esc(order.buyer_name)} · ${esc(order.buyer_phone)}</div></div>
+    <div class="field"><label>상품 / 채널 / 금액</label><div>${esc(order.product_id)} · ${esc(order.channel_id || "직접판매")} · ${fmtWon(order.total_amount)}</div></div>
+    <div class="field"><label>연결된 PIN</label>
+      <div>${pins.length ? pins.map(p => `${esc(p.pin_number)} (${statusBadge(p.status)})`).join(", ") : "-"}</div></div>
+    <div class="row2">
+      <div class="field"><label>상태</label>
+        <select id="ordStatusEdit">
+          ${["pending", "paid", "refunded", "cancelled", "failed"].map(s => `<option value="${s}" ${order.status === s ? "selected" : ""}>${s}</option>`).join("")}
+        </select>
+      </div>
+      <div class="field"><label>결제일시</label><div>${fmtDate(order.paid_at)}</div></div>
+    </div>
+    <div class="field"><label>관리자 메모</label><textarea id="ordMemoEdit" style="min-height:70px;font-family:inherit;font-size:13px;">${esc(order.admin_memo || "")}</textarea></div>
+    <div class="modal-err" id="ordErr"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">닫기</button>
+      <button class="btn danger" id="ordRefundBtn">환불 처리(주문+PIN 함께)</button>
+      <button class="btn primary" id="ordSaveBtn">저장</button>
+    </div>
+  `);
+  document.getElementById("ordSaveBtn").addEventListener("click", async () => {
+    try {
+      await restPatch("orders", `id=eq.${orderId}`, { status: document.getElementById("ordStatusEdit").value, admin_memo: document.getElementById("ordMemoEdit").value });
+      closeModal(); toast("저장했습니다."); loadOrdersTable();
+    } catch (e) { document.getElementById("ordErr").textContent = e.message; }
+  });
+  document.getElementById("ordRefundBtn").addEventListener("click", async () => {
+    if (!confirm("이 주문을 환불 처리하고, 연결된 PIN을 재고에서 회수(환불상태)합니다. 계속할까요?")) return;
+    try {
+      await restPatch("orders", `id=eq.${orderId}`, { status: "refunded", admin_memo: document.getElementById("ordMemoEdit").value });
+      for (const p of pins) {
+        await restPatch("pin_inventory", `id=eq.${p.id}`, { status: "refunded", refunded_by: me.name, refunded_at: new Date().toISOString() });
+      }
+      closeModal(); toast("환불 처리했습니다."); loadOrdersTable();
+    } catch (e) { document.getElementById("ordErr").textContent = e.message; }
+  });
+}
+
+/* ════════════════════════════════════════════════════════════
+   5. 재고(PIN) 관리
+   ════════════════════════════════════════════════════════════ */
+let invFilter = { venue: "", status: "", q: "" };
+
+async function renderInventory() {
+  const main = document.getElementById("main");
+  main.innerHTML = `<div class="panel"><div class="panel-head"><h2>재고(PIN) 목록</h2>
+    <div class="toolbar">
+      <input id="invVenue" placeholder="업장명" style="width:130px">
+      <select id="invStatus">
+        <option value="">전체 상태</option>
+        <option value="available">판매가능</option><option value="sold">판매완료</option>
+        <option value="used">사용완료</option><option value="refunded">환불</option>
+      </select>
+      <input id="invQ" placeholder="PIN번호 검색" style="width:150px">
+      <button class="btn" id="invSearchBtn">검색</button>
+      <button class="btn" id="invAddOneBtn">+ PIN 1건 추가</button>
+      <button class="btn primary" id="invBulkBtn">CSV 일괄 등록</button>
+      <input type="file" id="invFile" accept=".csv,.txt" style="display:none">
+    </div></div>
+    <div id="invTableWrap"><div class="empty">불러오는 중...</div></div>
+    <div class="hint">CSV 형식(헤더 없이 한 줄에 1건): venue_name,coupon_type,ticket_name,pin_number,valid_from(YYYY-MM-DD),valid_to,price<br>
+    id는 PIN번호를 기반으로 자동 생성됩니다. 이미 있는 PIN번호가 섞여 있으면 전체가 실패하니 중복은 미리 제거하세요.</div>
+  </div>`;
+  document.getElementById("invSearchBtn").addEventListener("click", () => {
+    invFilter = { venue: document.getElementById("invVenue").value.trim(), status: document.getElementById("invStatus").value, q: document.getElementById("invQ").value.trim() };
+    loadInventoryTable();
+  });
+  document.getElementById("invAddOneBtn").addEventListener("click", () => {
+    openJsonEditModal({
+      title: "PIN 1건 추가", table: "pin_inventory", pkCol: "id", isInsert: true,
+      initial: { id: "", venue_name: "", product_id: null, coupon_type: "", ticket_name: "", pin_number: "", valid_from: "", valid_to: "", status: "available", price: 0, note: "" },
+      onSaved: loadInventoryTable,
+    });
+  });
+  document.getElementById("invBulkBtn").addEventListener("click", () => document.getElementById("invFile").click());
+  document.getElementById("invFile").addEventListener("change", handleCsvUpload);
+  await loadInventoryTable();
+}
+
+async function loadInventoryTable() {
+  const wrap = document.getElementById("invTableWrap");
+  try {
+    let query = "?select=*&order=created_at.desc&limit=200";
+    if (invFilter.venue) query += `&venue_name=ilike.*${encodeURIComponent(invFilter.venue)}*`;
+    if (invFilter.status) query += `&status=eq.${invFilter.status}`;
+    if (invFilter.q) query += `&pin_number=ilike.*${encodeURIComponent(invFilter.q)}*`;
+    const rows = await restGet("pin_inventory", query);
+    wrap.innerHTML = dtTable(["ID", "업장", "권종", "PIN번호", "유효기간", "상태", "구매자", "액션"], rows.map(p => `
+      <tr>
+        <td>${esc(p.id)}</td><td>${esc(p.venue_name)}</td><td>${esc(p.coupon_type)} ${esc(p.ticket_name)}</td>
+        <td>${esc(p.pin_number)}</td><td>${esc(p.valid_from)} ~ ${esc(p.valid_to)}</td>
+        <td>${statusBadge(p.status)}</td><td>${esc(p.buyer_name || "-")}</td>
+        <td>
+          <button class="btn small" data-act="edit" data-id="${esc(p.id)}">편집</button>
+          ${me.role === "admin" ? `<button class="btn small danger" data-act="del" data-id="${esc(p.id)}">삭제</button>` : ""}
+        </td>
+      </tr>`));
+    wrap.querySelectorAll("[data-act=edit]").forEach(b => b.addEventListener("click", async () => {
+      const row = (await restGet("pin_inventory", `?id=eq.${b.dataset.id}&select=*`))[0];
+      openJsonEditModal({ title: `PIN 편집 — ${row.id}`, table: "pin_inventory", pkCol: "id", filterQuery: `id=eq.${row.id}`, initial: row, onSaved: loadInventoryTable });
+    }));
+    wrap.querySelectorAll("[data-act=del]").forEach(b => b.addEventListener("click", async () => {
+      if (!confirm("이 PIN을 영구 삭제할까요? 되돌릴 수 없습니다.")) return;
+      try { await restDelete("pin_inventory", `id=eq.${b.dataset.id}`); toast("삭제했습니다."); loadInventoryTable(); }
+      catch (e) { toast(e.message, true); }
+    }));
+  } catch (e) { wrap.innerHTML = `<div class="empty">불러오기 실패: ${esc(e.message)}</div>`; }
+}
+
+function slugifyPin(pin) { return "pin_" + String(pin).toLowerCase().replace(/[^a-z0-9]/g, ""); }
+
+async function handleCsvUpload(e) {
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (!file) return;
+  const text = await file.text();
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  const rows = [];
+  for (const line of lines) {
+    const [venue_name, coupon_type, ticket_name, pin_number, valid_from, valid_to, price] = line.split(",").map(s => (s || "").trim());
+    if (!pin_number) continue;
+    rows.push({ id: slugifyPin(pin_number), venue_name, coupon_type, ticket_name, pin_number, valid_from: valid_from || null, valid_to: valid_to || null, price: price ? Number(price) : 0, status: "available" });
+  }
+  if (!rows.length) { toast("유효한 행이 없습니다.", true); return; }
+  if (!confirm(`${rows.length}건을 등록합니다. 계속할까요?`)) return;
+  try {
+    await restInsert("pin_inventory", rows);
+    toast(`${rows.length}건 등록 완료.`);
+    loadInventoryTable();
+  } catch (err) { toast("등록 실패: " + err.message, true); }
+}
+
+/* ════════════════════════════════════════════════════════════
+   6. 회원 목록 (profiles, 읽기 전용)
+   ════════════════════════════════════════════════════════════ */
+async function renderMembers() {
+  const main = document.getElementById("main");
+  main.innerHTML = `<div class="panel"><div class="panel-head"><h2>회원 목록</h2>
+    <div class="toolbar"><input id="memQ" placeholder="이름/전화번호 검색" style="width:200px"><button class="btn" id="memSearchBtn">검색</button></div></div>
+    <div id="memTableWrap"><div class="empty">불러오는 중...</div></div>
+    <div class="hint">회원가입/로그인은 Supabase Auth로 처리되고, 이 화면은 profiles 테이블(부가정보)만 조회합니다. 조회 전용입니다.</div>
+  </div>`;
+  document.getElementById("memSearchBtn").addEventListener("click", loadMembersTable);
+  await loadMembersTable();
+}
+async function loadMembersTable() {
+  const wrap = document.getElementById("memTableWrap");
+  try {
+    const q = document.getElementById("memQ")?.value.trim();
+    let query = "?select=*&order=created_at.desc&limit=200";
+    if (q) query += `&or=(name.ilike.*${encodeURIComponent(q)}*,phone.ilike.*${encodeURIComponent(q)}*)`;
+    const rows = await restGet("profiles", query);
+    wrap.innerHTML = dtTable(["이름", "연락처", "이메일", "생년월일", "마케팅동의", "가입일시"], rows.map(m => `
+      <tr><td>${esc(m.name)}</td><td>${esc(m.phone)}</td><td>${esc(m.email)}</td><td>${esc(m.birthdate)}</td>
+      <td>${boolBadge(m.marketing_consent)}</td><td>${fmtDate(m.created_at)}</td></tr>`));
+  } catch (e) { wrap.innerHTML = `<div class="empty">불러오기 실패: ${esc(e.message)}</div>`; }
+}
+
+/* ════════════════════════════════════════════════════════════
+   7. 내 계정 (비밀번호 변경)
+   ════════════════════════════════════════════════════════════ */
+function renderMyAccount() {
+  const main = document.getElementById("main");
+  main.innerHTML = `<div class="panel" style="max-width:420px">
+    <div class="panel-head"><h2>내 계정</h2></div>
+    <div class="field"><label>이름 / 역할</label><div>${esc(me.name)} · ${me.role === "admin" ? "관리자" : "스태프"}</div></div>
+    <div class="field"><label>이메일</label><div>${esc(session.user.email)}</div></div>
+    <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
+    <div class="field"><label>새 비밀번호 (8자 이상)</label><input type="password" id="newPw"></div>
+    <div class="field"><label>새 비밀번호 확인</label><input type="password" id="newPw2"></div>
+    <div class="modal-err" id="pwErr"></div>
+    <button class="btn primary" id="pwSaveBtn">비밀번호 변경</button>
+  </div>`;
+  document.getElementById("pwSaveBtn").addEventListener("click", async () => {
+    const errEl = document.getElementById("pwErr");
+    const pw = document.getElementById("newPw").value, pw2 = document.getElementById("newPw2").value;
+    if (pw.length < 8) { errEl.textContent = "8자 이상 입력하세요."; return; }
+    if (pw !== pw2) { errEl.textContent = "두 비밀번호가 일치하지 않습니다."; return; }
+    try {
+      const res = await sbFetch("/auth/v1/user", { method: "PUT", body: { password: pw } });
+      if (!res.ok) throw new Error(await extractErr(res));
+      toast("비밀번호를 변경했습니다.");
+      document.getElementById("newPw").value = ""; document.getElementById("newPw2").value = "";
+    } catch (e) { errEl.textContent = e.message; }
+  });
+}
+
+/* ════════════════════════════════════════════════════════════
+   8. 관리자 계정 관리 (admin-staff Edge Function, admin 전용)
+   ════════════════════════════════════════════════════════════ */
+async function callAdminStaffApi(payload) {
+  const res = await sbFetch("/functions/v1/admin-staff", { method: "POST", body: payload });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.message || "요청 실패");
+  return data;
+}
+
+async function renderStaff() {
+  const main = document.getElementById("main");
+  if (me.role !== "admin") { main.innerHTML = `<div class="empty">관리자만 접근할 수 있습니다.</div>`; return; }
+  main.innerHTML = `<div class="panel"><div class="panel-head"><h2>관리자/스태프 계정</h2>
+    <div class="toolbar"><button class="btn primary" id="addStaffBtn">+ 계정 추가</button></div></div>
+    <div id="staffTableWrap"><div class="empty">불러오는 중...</div></div>
+  </div>`;
+  document.getElementById("addStaffBtn").addEventListener("click", openAddStaffModal);
+  await loadStaffTable();
+}
+
+async function loadStaffTable() {
+  const wrap = document.getElementById("staffTableWrap");
+  try {
+    const { staff } = await callAdminStaffApi({ action: "list" });
+    wrap.innerHTML = dtTable(["이름", "이메일", "역할", "활성", "가입일시", "액션"], staff.map(s => `
+      <tr>
+        <td>${esc(s.name)}</td><td>${esc(s.email)}</td><td>${s.role === "admin" ? "관리자" : "스태프"}</td>
+        <td>${boolBadge(s.active)}</td><td>${fmtDate(s.created_at)}</td>
+        <td>
+          <button class="btn small" data-act="toggle" data-id="${s.id}" data-val="${!s.active}">${s.active ? "비활성화" : "활성화"}</button>
+          <button class="btn small" data-act="role" data-id="${s.id}" data-val="${s.role === "admin" ? "staff" : "admin"}">${s.role === "admin" ? "스태프로 강등" : "관리자로 승격"}</button>
+          <button class="btn small" data-act="pw" data-id="${s.id}">비밀번호 재설정</button>
+        </td>
+      </tr>`));
+    wrap.querySelectorAll("[data-act=toggle]").forEach(b => b.addEventListener("click", async () => {
+      try { await callAdminStaffApi({ action: "update", id: b.dataset.id, active: b.dataset.val === "true" }); toast("변경했습니다."); loadStaffTable(); }
+      catch (e) { toast(e.message, true); }
+    }));
+    wrap.querySelectorAll("[data-act=role]").forEach(b => b.addEventListener("click", async () => {
+      try { await callAdminStaffApi({ action: "update", id: b.dataset.id, role: b.dataset.val }); toast("변경했습니다."); loadStaffTable(); }
+      catch (e) { toast(e.message, true); }
+    }));
+    wrap.querySelectorAll("[data-act=pw]").forEach(b => b.addEventListener("click", async () => {
+      const pw = prompt("새 비밀번호(8자 이상)를 입력하세요:");
+      if (!pw) return;
+      try { await callAdminStaffApi({ action: "reset_password", id: b.dataset.id, password: pw }); toast("비밀번호를 재설정했습니다."); }
+      catch (e) { toast(e.message, true); }
+    }));
+  } catch (e) { wrap.innerHTML = `<div class="empty">불러오기 실패: ${esc(e.message)}</div>`; }
+}
+
+function openAddStaffModal() {
+  openModal(`
+    <h3>계정 추가</h3>
+    <div class="field"><label>이름</label><input id="nsName"></div>
+    <div class="field"><label>이메일</label><input id="nsEmail" type="email"></div>
+    <div class="field"><label>임시 비밀번호(8자 이상)</label><input id="nsPw" type="text"></div>
+    <div class="field"><label>역할</label><select id="nsRole"><option value="staff">스태프</option><option value="admin">관리자</option></select></div>
+    <div class="modal-err" id="nsErr"></div>
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">취소</button><button class="btn primary" id="nsSaveBtn">추가</button></div>
+  `);
+  document.getElementById("nsSaveBtn").addEventListener("click", async () => {
+    const errEl = document.getElementById("nsErr");
+    try {
+      await callAdminStaffApi({
+        action: "create",
+        name: document.getElementById("nsName").value.trim(),
+        email: document.getElementById("nsEmail").value.trim(),
+        password: document.getElementById("nsPw").value,
+        role: document.getElementById("nsRole").value,
+      });
+      closeModal(); toast("계정을 추가했습니다."); loadStaffTable();
+    } catch (e) { errEl.textContent = e.message; }
+  });
+}
+
+/* ════════════════════════════════════════════════════════════
+   부팅 — 저장된 세션이 있으면 자동 로그인 시도
+   ════════════════════════════════════════════════════════════ */
+(async function boot() {
+  const saved = loadSession();
+  if (!saved) return;
+  session = saved;
+  if (session.expires_at - Math.floor(Date.now() / 1000) < 60) {
+    const ok = await tryRefresh();
+    if (!ok) { clearSession(); return; }
+  }
+  await afterLogin();
+})();
+</script>
+</body>
+</html>
