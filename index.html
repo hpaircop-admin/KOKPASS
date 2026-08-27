@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>콕패스 관리자</title>
+<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
   :root{
     --bg:#f5f4f1; --card:#ffffff; --border:rgba(20,20,20,.10);
@@ -172,6 +174,9 @@
 const SB_URL = "https://okdahyvqhbqvfpvtpcip.supabase.co";
 const SB_ANON_KEY = "sb_publishable_or8TBFpfxdJFC4MbC3PLrg_adM9L9h3";
 const SESSION_KEY = "kp_admin_session";
+// ticket.html(바코드 확인 페이지)이 실제로 배포되는 도메인. pin-admin Edge Function의
+// SITE_URL 환경변수와 반드시 같은 값을 가리켜야 발송되는 링크가 정상 동작합니다.
+const PIN_SITE_URL = "https://kokpass.co.kr";
 
 let session = null;      // {access_token, refresh_token, expires_at, user}
 let me = null;            // {id, name, role}
@@ -1137,11 +1142,31 @@ async function openOrderDetail(orderId) {
 /* ════════════════════════════════════════════════════════════
    5. 재고(PIN) 관리
    ════════════════════════════════════════════════════════════ */
-let invFilter = { venue: "", status: "", q: "" };
+// 2026-08-27: 더블에이치(HHCOMPANY) admin의 PIN 라이프사이클 관리(판매/바코드발송/
+// 사용처리/취소처리/복구/일괄처리)를 콕패스 스키마에 맞춰 이식. 상태값은 새 값을
+// 만들지 않고 기존 콕패스 어휘(available/sold/used/refunded + barcode_sent/sent_at)를
+// 그대로 사용한다 — HHCOMPANY는 sold와 별도로 sent 상태가 있었지만, 콕패스는 이미
+// barcode_sent(bool)+sent_at으로 발송여부를 추적하고 있어 마이그레이션 없이 그대로 확장.
+let invFilter = { venue: "", status: "", q: "", sent: "" };
+let invSelected = new Set();
+const INV_LOW_STOCK = 5;
+
+// 문자/카카오 발송은 SOLAPI 시크릿이 필요하므로 브라우저에서 직접 호출하지 않고,
+// 항상 이 Edge Function(pin-admin)을 거친다. 더블에이치 admin처럼 CFG.solapiKey를
+// 클라이언트 JS에 담는 방식은 시크릿 노출 위험이 있어 쓰지 않는다.
+async function callPinAdminApi(payload) {
+  const res = await sbFetch("/functions/v1/pin-admin", { method: "POST", body: payload });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.message || "요청 실패");
+  return data;
+}
 
 async function renderInventory() {
   const main = document.getElementById("main");
-  main.innerHTML = `<div class="panel"><div class="panel-head"><h2>재고(PIN) 목록</h2>
+  main.innerHTML = `
+    <div id="invKpiRow" class="kpi-row"></div>
+    <div id="invLowStockHint"></div>
+    <div class="panel"><div class="panel-head"><h2>재고(PIN) 목록</h2>
     <div class="toolbar">
       <input id="invVenue" placeholder="업장명" style="width:130px">
       <select id="invStatus">
@@ -1149,18 +1174,29 @@ async function renderInventory() {
         <option value="available">판매가능</option><option value="sold">판매완료</option>
         <option value="used">사용완료</option><option value="refunded">환불</option>
       </select>
-      <input id="invQ" placeholder="PIN번호 검색" style="width:150px">
+      <select id="invSent">
+        <option value="">발송여부 전체</option>
+        <option value="0">바코드 미발송만</option>
+        <option value="1">발송됨만</option>
+      </select>
+      <input id="invQ" placeholder="PIN번호/구매자 검색" style="width:150px">
       <button class="btn" id="invSearchBtn">검색</button>
       <button class="btn" id="invAddOneBtn">+ PIN 1건 추가</button>
       <button class="btn primary" id="invBulkBtn">CSV 일괄 등록</button>
-      <input type="file" id="invFile" accept=".csv,.txt" style="display:none">
+      <input type="file" id="invFile" accept=".csv,.txt,.xlsx,.xls" style="display:none">
     </div></div>
+    <div id="invBulkBar" class="hint" style="display:none;margin-bottom:10px;"></div>
     <div id="invTableWrap"><div class="empty">불러오는 중...</div></div>
-    <div class="hint">CSV 형식(헤더 없이 한 줄에 1건): venue_name,coupon_type,ticket_name,pin_number,valid_from(YYYY-MM-DD),valid_to,price<br>
-    id는 PIN번호를 기반으로 자동 생성됩니다. 이미 있는 PIN번호가 섞여 있으면 전체가 실패하니 중복은 미리 제거하세요.</div>
+    <div class="hint">CSV 또는 엑셀(.xlsx) 업로드 가능, 컬럼 순서(헤더 있어도/없어도 됨): venue_name,coupon_type,ticket_name,pin_number,valid_from(YYYY-MM-DD),valid_to,price<br>
+    id는 PIN번호를 기반으로 자동 생성됩니다. 이미 등록된 PIN번호나 파일 내 중복은 자동으로 걸러지고 새 것만 등록됩니다.</div>
   </div>`;
   document.getElementById("invSearchBtn").addEventListener("click", () => {
-    invFilter = { venue: document.getElementById("invVenue").value.trim(), status: document.getElementById("invStatus").value, q: document.getElementById("invQ").value.trim() };
+    invFilter = {
+      venue: document.getElementById("invVenue").value.trim(),
+      status: document.getElementById("invStatus").value,
+      q: document.getElementById("invQ").value.trim(),
+      sent: document.getElementById("invSent").value,
+    };
     loadInventoryTable();
   });
   document.getElementById("invAddOneBtn").addEventListener("click", () => {
@@ -1168,37 +1204,263 @@ async function renderInventory() {
   });
   document.getElementById("invBulkBtn").addEventListener("click", () => document.getElementById("invFile").click());
   document.getElementById("invFile").addEventListener("change", handleCsvUpload);
+  await loadInventoryKpi();
   await loadInventoryTable();
+}
+
+// 전체 재고 현황(가용/판매/미발송/사용/환불) + 업장별 재고부족(가용 5개 이하) 경고.
+async function loadInventoryKpi() {
+  const kpiRow = document.getElementById("invKpiRow");
+  const hintEl = document.getElementById("invLowStockHint");
+  if (!kpiRow) return;
+  try {
+    const [avail, sold, unsent, used, refunded] = await Promise.all([
+      restCount("pin_inventory", "?status=eq.available"),
+      restCount("pin_inventory", "?status=eq.sold"),
+      restCount("pin_inventory", "?status=eq.sold&barcode_sent=eq.false"),
+      restCount("pin_inventory", "?status=eq.used"),
+      restCount("pin_inventory", "?status=eq.refunded"),
+    ]);
+    kpiRow.innerHTML = `
+      <div class="kpi"><div class="n">${avail ?? "-"}</div><div class="l">판매가능</div></div>
+      <div class="kpi"><div class="n">${sold ?? "-"}</div><div class="l">판매완료</div></div>
+      <div class="kpi"><div class="n" style="${(unsent || 0) > 0 ? "color:var(--red);" : ""}">${unsent ?? "-"}</div><div class="l">바코드 미발송</div></div>
+      <div class="kpi"><div class="n">${used ?? "-"}</div><div class="l">사용완료</div></div>
+      <div class="kpi"><div class="n">${refunded ?? "-"}</div><div class="l">환불</div></div>
+    `;
+    const availRows = await restGet("pin_inventory", `?status=eq.available&select=venue_name`);
+    const byVenue = {};
+    availRows.forEach(r => { const k = r.venue_name || "(업장미지정)"; byVenue[k] = (byVenue[k] || 0) + 1; });
+    const lowVenues = Object.entries(byVenue).filter(([, n]) => n <= INV_LOW_STOCK);
+    hintEl.innerHTML = lowVenues.length
+      ? `<div class="hint" style="color:var(--amber);margin:-8px 0 14px;">⚠ 재고 부족(업장당 ${INV_LOW_STOCK}개 이하): ${lowVenues.map(([v, n]) => `${esc(v)}(${n}개)`).join(", ")}</div>`
+      : "";
+  } catch (e) { kpiRow.innerHTML = ""; }
 }
 
 async function loadInventoryTable() {
   const wrap = document.getElementById("invTableWrap");
+  invSelected.clear();
+  updateInvBulkBar();
   try {
     let query = "?select=*&order=created_at.desc&limit=200";
     if (invFilter.venue) query += `&venue_name=ilike.*${encodeURIComponent(invFilter.venue)}*`;
     if (invFilter.status) query += `&status=eq.${invFilter.status}`;
-    if (invFilter.q) query += `&pin_number=ilike.*${encodeURIComponent(invFilter.q)}*`;
+    if (invFilter.sent === "0") query += `&barcode_sent=eq.false`;
+    if (invFilter.sent === "1") query += `&barcode_sent=eq.true`;
+    if (invFilter.q) query += `&or=(pin_number.ilike.*${encodeURIComponent(invFilter.q)}*,buyer_name.ilike.*${encodeURIComponent(invFilter.q)}*)`;
     const rows = await restGet("pin_inventory", query);
-    wrap.innerHTML = dtTable(["ID", "업장", "권종", "PIN번호", "유효기간", "상태", "구매자", "액션"], rows.map(p => `
+    wrap.innerHTML = dtTable([`<input type="checkbox" id="invSelAll">`, "ID", "업장", "권종", "PIN번호", "유효기간", "상태", "발송", "구매자", "액션"], rows.map(p => {
+      const canSell = p.status === "available";
+      const canManage = p.status === "sold" || p.status === "used";
+      const canRestore = p.status === "used" || p.status === "refunded";
+      return `
       <tr>
+        <td>${p.status === "sold" ? `<input type="checkbox" class="invRowSel" data-id="${esc(p.id)}">` : ""}</td>
         <td>${esc(p.id)}</td><td>${esc(p.venue_name)}</td><td>${esc(p.coupon_type)} ${esc(p.ticket_name)}</td>
         <td>${esc(p.pin_number)}</td><td>${esc(p.valid_from)} ~ ${esc(p.valid_to)}</td>
-        <td>${statusBadge(p.status)}</td><td>${esc(p.buyer_name || "-")}</td>
-        <td>
+        <td>${statusBadge(p.status)}</td>
+        <td>${p.barcode_sent ? `<span class="badge green">발송</span>` : `<span class="badge gray">미발송</span>`}</td>
+        <td>${esc(p.buyer_name || "-")}</td>
+        <td style="white-space:nowrap;">
+          ${canSell ? `<button class="btn small primary" data-act="sell" data-id="${esc(p.id)}">판매처리</button>` : ""}
+          ${canManage ? `<button class="btn small" data-act="barcode" data-id="${esc(p.id)}">바코드</button>` : ""}
+          ${canManage ? `<button class="btn small" data-act="resend" data-id="${esc(p.id)}">${p.barcode_sent ? "재발송" : "발송"}</button>` : ""}
+          ${p.status === "sold" ? `<button class="btn small" data-act="used" data-id="${esc(p.id)}">사용처리</button>` : ""}
+          ${canManage ? `<button class="btn small danger" data-act="cancel" data-id="${esc(p.id)}">취소처리</button>` : ""}
+          ${canRestore ? `<button class="btn small" data-act="restore" data-id="${esc(p.id)}">복구</button>` : ""}
           <button class="btn small" data-act="edit" data-id="${esc(p.id)}">편집</button>
           ${me.role === "admin" ? `<button class="btn small danger" data-act="del" data-id="${esc(p.id)}">삭제</button>` : ""}
         </td>
-      </tr>`));
+      </tr>`;
+    }));
+    document.getElementById("invSelAll")?.addEventListener("change", (e) => {
+      wrap.querySelectorAll(".invRowSel").forEach(cb => { cb.checked = e.target.checked; toggleInvSel(cb.dataset.id, e.target.checked); });
+    });
+    wrap.querySelectorAll(".invRowSel").forEach(cb => cb.addEventListener("change", () => toggleInvSel(cb.dataset.id, cb.checked)));
+    wrap.querySelectorAll("[data-act=sell]").forEach(b => b.addEventListener("click", async () => {
+      const row = (await restGet("pin_inventory", `?id=eq.${b.dataset.id}&select=*`))[0];
+      openPinSellModal(row);
+    }));
+    wrap.querySelectorAll("[data-act=barcode]").forEach(b => b.addEventListener("click", async () => {
+      const row = (await restGet("pin_inventory", `?id=eq.${b.dataset.id}&select=*`))[0];
+      openBarcodeModal(row);
+    }));
+    wrap.querySelectorAll("[data-act=resend]").forEach(b => b.addEventListener("click", () => resendBarcode(b.dataset.id)));
+    wrap.querySelectorAll("[data-act=used]").forEach(b => b.addEventListener("click", () => markPinUsed(b.dataset.id)));
+    wrap.querySelectorAll("[data-act=cancel]").forEach(b => b.addEventListener("click", async () => {
+      const row = (await restGet("pin_inventory", `?id=eq.${b.dataset.id}&select=*`))[0];
+      openPinCancelModal(row);
+    }));
+    wrap.querySelectorAll("[data-act=restore]").forEach(b => b.addEventListener("click", () => restorePinStatus(b.dataset.id)));
     wrap.querySelectorAll("[data-act=edit]").forEach(b => b.addEventListener("click", async () => {
       const row = (await restGet("pin_inventory", `?id=eq.${b.dataset.id}&select=*`))[0];
       openPinModal(row);
     }));
     wrap.querySelectorAll("[data-act=del]").forEach(b => b.addEventListener("click", async () => {
       if (!confirm("이 PIN을 영구 삭제할까요? 되돌릴 수 없습니다.")) return;
-      try { await restDelete("pin_inventory", `id=eq.${b.dataset.id}`); toast("삭제했습니다."); loadInventoryTable(); }
+      try { await restDelete("pin_inventory", `id=eq.${b.dataset.id}`); toast("삭제했습니다."); loadInventoryTable(); loadInventoryKpi(); }
       catch (e) { toast(friendlyDeleteError(e, "PIN"), true); }
     }));
   } catch (e) { wrap.innerHTML = `<div class="empty">불러오기 실패: ${esc(e.message)}</div>`; }
+}
+
+function toggleInvSel(id, checked) {
+  if (checked) invSelected.add(id); else invSelected.delete(id);
+  updateInvBulkBar();
+}
+
+function updateInvBulkBar() {
+  const bar = document.getElementById("invBulkBar");
+  if (!bar) return;
+  if (!invSelected.size) { bar.style.display = "none"; bar.innerHTML = ""; return; }
+  bar.style.display = "block";
+  bar.innerHTML = `${invSelected.size}건 선택됨 · <button class="btn small primary" id="invBulkUsedBtn">선택 일괄 사용처리</button>`;
+  document.getElementById("invBulkUsedBtn").addEventListener("click", bulkMarkPinsUsed);
+}
+
+async function bulkMarkPinsUsed() {
+  const ids = Array.from(invSelected);
+  if (!ids.length) return;
+  if (!confirm(`선택한 ${ids.length}건을 모두 사용처리할까요?`)) return;
+  const nowIso = new Date().toISOString();
+  let okCount = 0;
+  for (const id of ids) {
+    try { await restPatch("pin_inventory", `id=eq.${id}`, { status: "used", used_at: nowIso }); okCount++; }
+    catch (e) { /* 개별 실패는 건너뛰고 계속 진행 */ }
+  }
+  toast(`${okCount}/${ids.length}건 사용처리했습니다.`);
+  invSelected.clear();
+  loadInventoryTable(); loadInventoryKpi();
+}
+
+async function markPinUsed(id) {
+  if (!confirm("이 PIN을 사용처리 할까요?")) return;
+  try {
+    await restPatch("pin_inventory", `id=eq.${id}`, { status: "used", used_at: new Date().toISOString() });
+    toast("사용처리 했습니다."); loadInventoryTable(); loadInventoryKpi();
+  } catch (e) { toast("실패: " + e.message, true); }
+}
+
+// 취소(환불)처리 — 주문 화면의 환불처리와 동일하게 refund_reason/refund_amount/
+// refunded_by/refunded_at을 구조화된 폼으로 입력받는다.
+function openPinCancelModal(row) {
+  openModal(`
+    <h3>취소처리 — ${esc(row.pin_number)}</h3>
+    <div class="hint">${esc(row.venue_name)} · ${esc(row.buyer_name || "-")} · ${esc(row.buyer_phone || "-")}</div>
+    <div class="field"><label>취소 사유</label><textarea id="pcReason" placeholder="예: 고객 변심, 중복결제 등" style="min-height:70px;font-family:inherit;font-size:13px;"></textarea></div>
+    <div class="row2">
+      <div class="field"><label>환불 금액</label><input id="pcAmount" type="number" value="${row.price != null ? row.price : 0}"></div>
+      <div class="field"><label>처리자</label><input id="pcBy" value="${esc(me.name)}"></div>
+    </div>
+    <div class="modal-err" id="pcErr"></div>
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">닫기</button><button class="btn danger" id="pcSaveBtn">취소처리</button></div>
+  `);
+  document.getElementById("pcSaveBtn").addEventListener("click", async () => {
+    const errEl = document.getElementById("pcErr");
+    try {
+      await restPatch("pin_inventory", `id=eq.${row.id}`, {
+        status: "refunded",
+        refund_reason: document.getElementById("pcReason").value.trim(),
+        refund_amount: Number(document.getElementById("pcAmount").value) || 0,
+        refunded_by: document.getElementById("pcBy").value.trim() || me.name,
+        refunded_at: new Date().toISOString(),
+      });
+      closeModal(); toast("취소처리 했습니다."); loadInventoryTable(); loadInventoryKpi();
+    } catch (e) { errEl.textContent = e.message; }
+  });
+}
+
+// 복구(되돌리기) — used/refunded를 되돌린다. 구매자 정보가 남아있으면 sold로,
+// 없으면 available로 되돌린다(더블에이치 admin의 restorePinStatus와 동일한 판단 기준).
+async function restorePinStatus(id) {
+  try {
+    const row = (await restGet("pin_inventory", `?id=eq.${id}&select=*`))[0];
+    if (!row) return;
+    const target = row.buyer_name ? "sold" : "available";
+    if (!confirm(`이 PIN을 "${target === "sold" ? "판매완료" : "판매가능"}" 상태로 되돌릴까요?`)) return;
+    const patch = { status: target };
+    if (row.status === "refunded") { patch.refund_reason = null; patch.refund_amount = null; patch.refunded_by = null; patch.refunded_at = null; }
+    if (row.status === "used") { patch.used_at = null; }
+    await restPatch("pin_inventory", `id=eq.${id}`, patch);
+    toast("복구했습니다."); loadInventoryTable(); loadInventoryKpi();
+  } catch (e) { toast("실패: " + e.message, true); }
+}
+
+// 수동 판매처리(현장/전화 판매 등 온라인 결제를 거치지 않은 건). 문자/카카오 발송은
+// SOLAPI 시크릿을 다루는 pin-admin Edge Function을 통해서만 이뤄진다.
+function openPinSellModal(row) {
+  openModal(`
+    <h3>판매처리 — ${esc(row.pin_number)}</h3>
+    <div class="hint">${esc(row.venue_name)} · ${esc(row.coupon_type)} ${esc(row.ticket_name)} · 유효기간 ${esc(row.valid_from)} ~ ${esc(row.valid_to)}</div>
+    <div class="row2">
+      <div class="field"><label>구매자명</label><input id="psName"></div>
+      <div class="field"><label>연락처(문자/카톡 발송용)</label><input id="psPhone" placeholder="010-0000-0000"></div>
+    </div>
+    <div class="field"><label>판매가격</label><input id="psPrice" type="number" value="${row.price != null ? row.price : 0}"></div>
+    <div class="field"><label><input type="checkbox" id="psAutosend" checked style="width:auto;margin-right:6px;">판매처리 즉시 바코드 문자/카카오 발송</label></div>
+    <div class="modal-err" id="psErr"></div>
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">취소</button><button class="btn primary" id="psSaveBtn">판매처리</button></div>
+  `);
+  document.getElementById("psSaveBtn").addEventListener("click", async () => {
+    const errEl = document.getElementById("psErr");
+    const buyerName = document.getElementById("psName").value.trim();
+    const buyerPhone = document.getElementById("psPhone").value.trim();
+    if (!buyerName || !buyerPhone) { errEl.textContent = "구매자명/연락처를 입력하세요."; return; }
+    try {
+      const result = await callPinAdminApi({
+        action: "sell", pinId: row.id, buyerName, buyerPhone,
+        price: document.getElementById("psPrice").value,
+        autosend: document.getElementById("psAutosend").checked,
+      });
+      closeModal();
+      if (result.sendResult && !result.sendResult.ok) {
+        toast(`판매처리는 완료됐지만 발송 실패: ${result.sendResult.error || "알 수 없는 오류"} (환경설정의 SOLAPI 연동을 확인하세요)`, true);
+      } else {
+        toast(result.sendResult ? "판매처리 및 바코드 발송 완료." : "판매처리 완료(발송 안 함).");
+      }
+      loadInventoryTable(); loadInventoryKpi();
+    } catch (e) { errEl.textContent = e.message; }
+  });
+}
+
+// 바코드 보기 — 고객이 ticket.html에서 보는 것과 동일한 Code128 바코드를 관리자
+// 화면에서도 미리 확인할 수 있게 한다. displayValue/fontSize는 ticket.html과 동일하게 맞춤.
+function openBarcodeModal(row) {
+  openModal(`
+    <h3>바코드 — ${esc(row.venue_name)}</h3>
+    <div class="hint">${esc(row.buyer_name || "-")} · ${esc(row.buyer_phone || "-")} · 발송상태: ${row.barcode_sent ? "발송됨(" + fmtDate(row.sent_at) + ")" : "미발송"}</div>
+    <div style="background:#fafafa;border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center;margin:12px 0;">
+      <svg id="pinBarcodeSvg"></svg>
+    </div>
+    <div class="field"><label>고객용 링크</label><input id="pinTicketLink" readonly value="${esc(PIN_SITE_URL)}/ticket.html?pin=${esc(row.pin_number)}"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">닫기</button>
+      <button class="btn" id="pinCopyLinkBtn">링크 복사</button>
+      <button class="btn primary" id="pinResendFromModalBtn">${row.barcode_sent ? "재발송" : "발송"}</button>
+    </div>
+  `);
+  try {
+    JsBarcode("#pinBarcodeSvg", row.pin_number, { format: "CODE128", width: 2.2, height: 80, displayValue: true, fontSize: 15, margin: 6 });
+  } catch (e) {
+    document.getElementById("pinBarcodeSvg").outerHTML = `<div style="font-size:18px;font-weight:800;letter-spacing:.06em;">${esc(row.pin_number)}</div>`;
+  }
+  document.getElementById("pinCopyLinkBtn").addEventListener("click", () => {
+    const input = document.getElementById("pinTicketLink");
+    input.select();
+    navigator.clipboard?.writeText(input.value).then(() => toast("링크를 복사했습니다.")).catch(() => {});
+  });
+  document.getElementById("pinResendFromModalBtn").addEventListener("click", () => { closeModal(); resendBarcode(row.id); });
+}
+
+async function resendBarcode(id) {
+  if (!confirm("바코드 링크를 문자/카카오로 (재)발송할까요?")) return;
+  try {
+    const result = await callPinAdminApi({ action: "resend", pinId: id });
+    if (result.ok) toast("발송했습니다.");
+    else toast(`발송 실패: ${result.sendResult?.error || "알 수 없는 오류"}`, true);
+    loadInventoryTable(); loadInventoryKpi();
+  } catch (e) { toast("발송 실패: " + e.message, true); }
 }
 
 function slugifyPin(pin) { return "pin_" + String(pin).toLowerCase().replace(/[^a-z0-9]/g, ""); }
@@ -1266,25 +1528,116 @@ async function savePinForm(id) {
   } catch (e) { errEl.textContent = e.message; }
 }
 
+// 2026-08-27: 더블에이치(HHCOMPANY) admin의 대량 업로드(엑셀 지원 + 중복 자동 제외 +
+// 분할 등록 + 결과 요약)를 참고해 보완. 기존에는 CSV 한 줄이라도 형식이 틀리거나
+// 이미 등록된 PIN번호가 하나만 섞여 있어도 insert 전체가 실패했던 문제를 고친다:
+// 이제 (1) 파일 내부 중복은 제거, (2) 이미 DB에 있는 PIN번호는 조회해서 건너뛰고,
+// (3) 200건 단위로 나눠 등록해서 한 구간이 실패해도 나머지는 계속 진행한다.
+function fmtUploadDate(v) {
+  if (v == null || v === "") return "";
+  const s = String(v).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const m = s.match(/^(\d{4})[./-](\d{1,2})[./-](\d{1,2})/);
+  if (m) return `${m[1]}-${String(m[2]).padStart(2, "0")}-${String(m[3]).padStart(2, "0")}`;
+  // 엑셀에서 날짜 셀이 숫자(시리얼값)로 넘어온 경우
+  if (/^\d{4,6}(\.\d+)?$/.test(s) && typeof XLSX !== "undefined") {
+    try { const d = XLSX.SSF.parse_date_code(Number(s)); if (d) return `${d.y}-${String(d.m).padStart(2, "0")}-${String(d.d).padStart(2, "0")}`; } catch (_e) {}
+  }
+  return "";
+}
+
 async function handleCsvUpload(e) {
   const file = e.target.files[0];
   e.target.value = "";
   if (!file) return;
-  const text = await file.text();
-  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-  const rows = [];
-  for (const line of lines) {
-    const [venue_name, coupon_type, ticket_name, pin_number, valid_from, valid_to, price] = line.split(",").map(s => (s || "").trim());
-    if (!pin_number) continue;
-    rows.push({ id: slugifyPin(pin_number), venue_name, coupon_type, ticket_name, pin_number, valid_from: valid_from || null, valid_to: valid_to || null, price: price ? Number(price) : 0, status: "available" });
-  }
-  if (!rows.length) { toast("유효한 행이 없습니다.", true); return; }
-  if (!confirm(`${rows.length}건을 등록합니다. 계속할까요?`)) return;
+
+  const isExcel = /\.xlsx?$/i.test(file.name);
+  let rawRows;
   try {
-    await restInsert("pin_inventory", rows);
-    toast(`${rows.length}건 등록 완료.`);
-    loadInventoryTable();
-  } catch (err) { toast("등록 실패: " + err.message, true); }
+    if (isExcel) {
+      if (typeof XLSX === "undefined") { toast("엑셀 파싱 라이브러리를 불러오지 못했습니다. CSV로 시도해주세요.", true); return; }
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: "array" });
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      rawRows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: "" });
+    } else {
+      const text = await file.text();
+      rawRows = text.split(/\r?\n/).map(l => l.split(",").map(s => (s || "").trim())).filter(cols => cols.some(c => c !== ""));
+    }
+  } catch (err) { toast("파일을 읽는 중 오류: " + err.message, true); return; }
+
+  if (!rawRows || !rawRows.length) { toast("파일에 데이터가 없습니다.", true); return; }
+
+  // 첫 줄에 헤더로 보이는 단어(venue/업장/pin/핀 등)가 있으면 헤더 행으로 보고 건너뛴다.
+  const HEADER_HINTS = ["venue", "업장", "coupon", "권종", "ticket", "티켓", "pin", "핀", "valid", "유효", "price", "가격"];
+  const firstRowText = (rawRows[0] || []).join(" ").toLowerCase();
+  const startIdx = HEADER_HINTS.some(h => firstRowText.includes(h)) ? 1 : 0;
+
+  const parsed = [];
+  let malformedCount = 0;
+  for (let i = startIdx; i < rawRows.length; i++) {
+    const cols = rawRows[i] || [];
+    if (!cols.some(c => String(c || "").trim() !== "")) continue; // 빈 줄
+    const [venue_name, coupon_type, ticket_name, pin_number, valid_from, valid_to, price] =
+      cols.map(s => (s ?? "").toString().trim());
+    if (!pin_number) { malformedCount++; continue; }
+    parsed.push({
+      id: slugifyPin(pin_number), venue_name, coupon_type, ticket_name, pin_number,
+      valid_from: fmtUploadDate(valid_from) || null,
+      valid_to: fmtUploadDate(valid_to) || null,
+      price: price ? Number(String(price).replace(/[^0-9.]/g, "")) || 0 : 0,
+      status: "available",
+    });
+  }
+  if (!parsed.length) { toast("유효한 행이 없습니다. (PIN번호가 비어있는 행뿐입니다)", true); return; }
+
+  // 파일 내부 중복 PIN번호 제거(뒤에 나온 값 우선)
+  const byPin = new Map();
+  parsed.forEach(r => byPin.set(r.pin_number, r));
+  const deduped = Array.from(byPin.values());
+  const inFileDupCount = parsed.length - deduped.length;
+
+  // 이미 DB에 등록된 PIN번호는 조회해서 건너뛴다(HHCOMPANY 방식 — 하나 겹친다고 전체를 막지 않음)
+  const existingSet = new Set();
+  try {
+    const CHECK_CHUNK = 150;
+    for (let i = 0; i < deduped.length; i += CHECK_CHUNK) {
+      const chunk = deduped.slice(i, i + CHECK_CHUNK);
+      const inList = chunk.map(r => `"${encodeURIComponent(r.pin_number)}"`).join(",");
+      const found = await restGet("pin_inventory", `?pin_number=in.(${inList})&select=pin_number`);
+      found.forEach(f => existingSet.add(f.pin_number));
+    }
+  } catch (err) { /* 중복 사전조회 실패해도 등록은 계속 진행 — 실패한 구간은 결과에 표시됨 */ }
+
+  const toInsert = deduped.filter(r => !existingSet.has(r.pin_number));
+  const dupInDbCount = deduped.length - toInsert.length;
+
+  if (!toInsert.length) {
+    toast(`등록할 새 PIN이 없습니다. (이미 등록됨 ${dupInDbCount}건, 파일 내 중복 ${inFileDupCount}건)`, true);
+    return;
+  }
+
+  const summaryLines = [`총 ${rawRows.length - startIdx}행 중 신규 ${toInsert.length}건을 등록합니다.`];
+  if (inFileDupCount) summaryLines.push(`파일 내 중복 ${inFileDupCount}건 제외`);
+  if (dupInDbCount) summaryLines.push(`이미 등록된 PIN ${dupInDbCount}건 제외`);
+  if (malformedCount) summaryLines.push(`PIN번호 없는 행 ${malformedCount}건 제외`);
+  if (!confirm(summaryLines.join("\n") + "\n계속할까요?")) return;
+
+  let okCount = 0;
+  const failedRanges = [];
+  const INSERT_CHUNK = 200;
+  for (let i = 0; i < toInsert.length; i += INSERT_CHUNK) {
+    const chunk = toInsert.slice(i, i + INSERT_CHUNK);
+    try { await restInsert("pin_inventory", chunk); okCount += chunk.length; }
+    catch (err) { failedRanges.push(`${i + 1}~${i + chunk.length}(${err.message})`); }
+  }
+
+  loadInventoryTable(); loadInventoryKpi();
+  if (failedRanges.length) {
+    toast(`${okCount}건 등록 완료, 일부 구간 실패: ${failedRanges.join(", ")}`, true);
+  } else {
+    toast(`${okCount}건 등록 완료.${inFileDupCount || dupInDbCount ? ` (중복 ${inFileDupCount + dupInDbCount}건 자동 제외)` : ""}`);
+  }
 }
 
 /* ════════════════════════════════════════════════════════════
