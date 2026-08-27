@@ -141,6 +141,8 @@
     <div class="sb-item" data-tab="settlements">정산</div>
     <div class="sb-group">회원</div>
     <div class="sb-item" data-tab="members">회원 목록</div>
+    <div class="sb-group">콘텐츠</div>
+    <div class="sb-item" data-tab="blog">블로그 관리</div>
     <div class="sb-group">설정</div>
     <div class="sb-item" data-tab="myaccount">내 계정</div>
     <div class="sb-item" id="staffNavItem" data-tab="staff">관리자 계정 관리</div>
@@ -329,13 +331,13 @@ setInterval(() => {
 const TAB_TITLES = {
   dashboard: "대시보드", products: "상품 관리", channels: "채널(폐쇄몰) 관리",
   orders: "주문 관리", inventory: "재고(PIN) 관리", venues: "업장 관리",
-  settlements: "정산", members: "회원 목록",
+  settlements: "정산", members: "회원 목록", blog: "블로그 관리",
   myaccount: "내 계정", staff: "관리자 계정 관리",
 };
 const TAB_RENDERERS = {
   dashboard: renderDashboard, products: renderProducts, channels: renderChannels,
   orders: renderOrders, inventory: renderInventory, venues: renderVenues,
-  settlements: renderSettlements, members: renderMembers,
+  settlements: renderSettlements, members: renderMembers, blog: renderBlog,
   myaccount: renderMyAccount, staff: renderStaff,
 };
 
@@ -912,6 +914,128 @@ async function openChannelProducts(channelId) {
       closeModal(); toast("노출 상품을 저장했습니다.");
     } catch (e) { errEl.textContent = e.message; }
   });
+}
+
+/* ════════════════════════════════════════════════════════════
+   3-5. 블로그 관리 (승인 전에는 비공개 — status: draft/published)
+   자동 작성된 초안(source=auto)도 이 화면에서 검토 후 "승인"해야
+   실제 사이트(blog.html)에 노출됨. anon RLS는 published 행만 읽을 수 있음.
+   ════════════════════════════════════════════════════════════ */
+let blogFilter = "all";
+
+async function renderBlog() {
+  const main = document.getElementById("main");
+  main.innerHTML = `<div class="panel"><div class="panel-head"><h2>블로그 관리</h2>
+    <div class="toolbar"><button class="btn primary" id="addBlogBtn">+ 새 글 작성</button></div></div>
+    <div class="toolbar" style="margin-bottom:14px;">
+      <button class="btn small" data-filter="all">전체</button>
+      <button class="btn small" data-filter="draft">검토대기(비공개)</button>
+      <button class="btn small" data-filter="published">게시됨</button>
+    </div>
+    <div id="blogTableWrap"><div class="empty">불러오는 중...</div></div>
+    <div class="hint">"검토대기" 상태의 글은 승인 전까지 사이트(blog.html)에 노출되지 않습니다. 자동 작성된 초안도 반드시 내용을 확인한 뒤 승인하세요 — 특히 건강기능식품 관련 문구(효능 과장, 질병 예방/치료 암시)가 없는지 확인이 필요합니다.</div>
+  </div>`;
+  document.getElementById("addBlogBtn").addEventListener("click", () => openBlogModal(null));
+  main.querySelectorAll("[data-filter]").forEach(b => b.addEventListener("click", () => { blogFilter = b.dataset.filter; loadBlogTable(); }));
+  await loadBlogTable();
+}
+
+async function loadBlogTable() {
+  const wrap = document.getElementById("blogTableWrap");
+  try {
+    const q = blogFilter === "all" ? "" : `&status=eq.${blogFilter}`;
+    const rows = await restGet("blog_posts", `?select=*&order=created_at.desc${q}`);
+    wrap.innerHTML = dtTable(["상태", "제목", "카테고리", "작성방식", "작성일", "액션"], rows.map(p => `
+      <tr>
+        <td>${p.status === "published" ? '<span class="badge green">게시됨</span>' : '<span class="badge amber">검토대기</span>'}</td>
+        <td>${esc(p.title)}</td>
+        <td>${esc(p.category)}</td>
+        <td>${p.source === "auto" ? "자동 초안" : "수동 작성"}</td>
+        <td>${p.created_at ? esc(p.created_at.slice(0, 10)) : ""}</td>
+        <td>
+          <button class="btn small" data-act="edit" data-slug="${esc(p.slug)}">편집</button>
+          ${p.status === "published"
+            ? `<button class="btn small" data-act="unpublish" data-slug="${esc(p.slug)}">비공개로</button>`
+            : `<button class="btn small primary" data-act="approve" data-slug="${esc(p.slug)}">승인(게시)</button>`}
+          ${me.role === "admin" ? `<button class="btn small danger" data-act="del" data-slug="${esc(p.slug)}">삭제</button>` : ""}
+        </td>
+      </tr>`));
+    wrap.querySelectorAll("[data-act=edit]").forEach(b => b.addEventListener("click", async () => {
+      const row = (await restGet("blog_posts", `?slug=eq.${b.dataset.slug}&select=*`))[0];
+      openBlogModal(row);
+    }));
+    wrap.querySelectorAll("[data-act=approve]").forEach(b => b.addEventListener("click", async () => {
+      try {
+        await restPatch("blog_posts", `slug=eq.${b.dataset.slug}`, { status: "published", published_at: new Date().toISOString() });
+        toast("게시했습니다."); loadBlogTable();
+      } catch (e) { toast(e.message, true); }
+    }));
+    wrap.querySelectorAll("[data-act=unpublish]").forEach(b => b.addEventListener("click", async () => {
+      if (!confirm("이 글을 비공개로 전환할까요? 사이트에서 즉시 내려갑니다.")) return;
+      try { await restPatch("blog_posts", `slug=eq.${b.dataset.slug}`, { status: "draft" }); toast("비공개로 전환했습니다."); loadBlogTable(); }
+      catch (e) { toast(e.message, true); }
+    }));
+    wrap.querySelectorAll("[data-act=del]").forEach(b => b.addEventListener("click", async () => {
+      if (!confirm("이 글을 영구 삭제할까요? 되돌릴 수 없습니다.")) return;
+      try { await restDelete("blog_posts", `slug=eq.${b.dataset.slug}`); toast("삭제했습니다."); loadBlogTable(); }
+      catch (e) { toast(friendlyDeleteError(e, "블로그 글"), true); }
+    }));
+  } catch (e) { wrap.innerHTML = `<div class="empty">불러오기 실패: ${esc(e.message)}</div>`; }
+}
+
+function openBlogModal(row) {
+  const isInsert = !row;
+  const v = row || { slug: "", title: "", excerpt: "", content_html: "", cover_image_url: "", category: "아이건강정보", status: "draft", author: "콕패스" };
+  openModal(`
+    <h3>${isInsert ? "새 글 작성" : `글 편집 — ${esc(v.title)}`}</h3>
+    ${isInsert ? `<div class="field"><label>슬러그(URL용, 영문/숫자/하이픈, 고유값)</label><input id="bpSlug" value="${esc(v.slug)}" placeholder="예: kids-vitamin-guide"></div>` : ""}
+    <div class="field"><label>제목</label><input id="bpTitle" value="${esc(v.title)}"></div>
+    <div class="row2">
+      <div class="field"><label>카테고리</label><select id="bpCategory">
+        <option value="아이건강정보" ${v.category === "아이건강정보" ? "selected" : ""}>아이건강정보</option>
+        <option value="체험이야기" ${v.category === "체험이야기" ? "selected" : ""}>체험이야기</option>
+        <option value="공지사항" ${v.category === "공지사항" ? "selected" : ""}>공지사항</option>
+      </select></div>
+      <div class="field"><label>상태</label><select id="bpStatus">
+        <option value="draft" ${v.status === "draft" ? "selected" : ""}>검토대기(비공개)</option>
+        <option value="published" ${v.status === "published" ? "selected" : ""}>게시됨</option>
+      </select></div>
+    </div>
+    <div class="field"><label>요약(목록에 보이는 한 줄 소개)</label><input id="bpExcerpt" value="${esc(v.excerpt || "")}"></div>
+    <div class="field"><label>커버 이미지 URL</label><input id="bpCover" value="${esc(v.cover_image_url || "")}" placeholder="https://..."></div>
+    <div class="field"><label>본문(HTML)</label><textarea id="bpContent" style="min-height:220px;">${esc(v.content_html || "")}</textarea></div>
+    <div class="modal-err" id="bpErr"></div>
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">취소</button><button class="btn primary" id="bpSaveBtn">저장</button></div>
+  `);
+  document.getElementById("bpSaveBtn").addEventListener("click", () => saveBlogForm(isInsert ? null : v.slug, isInsert));
+}
+
+async function saveBlogForm(slug, isInsert) {
+  const errEl = document.getElementById("bpErr");
+  errEl.textContent = "";
+  const status = document.getElementById("bpStatus").value;
+  const body = {
+    title: document.getElementById("bpTitle").value.trim(),
+    category: document.getElementById("bpCategory").value,
+    status,
+    excerpt: document.getElementById("bpExcerpt").value.trim(),
+    cover_image_url: document.getElementById("bpCover").value.trim(),
+    content_html: document.getElementById("bpContent").value,
+    updated_at: new Date().toISOString(),
+  };
+  if (!body.title) { errEl.textContent = "제목을 입력하세요."; return; }
+  try {
+    if (isInsert) {
+      const newSlug = document.getElementById("bpSlug").value.trim();
+      if (!newSlug) { errEl.textContent = "슬러그를 입력하세요."; return; }
+      if (status === "published") body.published_at = new Date().toISOString();
+      await restInsert("blog_posts", [{ slug: newSlug, source: "manual", ...body }]);
+    } else {
+      if (status === "published") body.published_at = new Date().toISOString();
+      await restPatch("blog_posts", `slug=eq.${slug}`, body);
+    }
+    closeModal(); toast("저장했습니다."); loadBlogTable();
+  } catch (e) { errEl.textContent = e.message; }
 }
 
 /* ════════════════════════════════════════════════════════════
