@@ -134,6 +134,9 @@
     <div class="sb-item" data-tab="channels">채널(폐쇄몰) 관리</div>
     <div class="sb-item" data-tab="orders">주문 관리</div>
     <div class="sb-item" data-tab="inventory">재고(PIN) 관리</div>
+    <div class="sb-item" data-tab="venues">업장 관리</div>
+    <div class="sb-group">정산</div>
+    <div class="sb-item" data-tab="settlements">정산</div>
     <div class="sb-group">회원</div>
     <div class="sb-item" data-tab="members">회원 목록</div>
     <div class="sb-group">설정</div>
@@ -244,6 +247,15 @@ async function extractErr(res) {
   try { const j = await res.json(); return j.message || j.msg || j.error_description || JSON.stringify(j); }
   catch { return `요청 실패 (HTTP ${res.status})`; }
 }
+/* 삭제 실패 시 외래키 참조(FK) 위반 메시지를 그대로 보여주지 않고 알기 쉬운 안내로 바꿔준다.
+   예: 이미 주문/재고/노출상품에서 참조 중인 상품·채널을 삭제하려는 경우. */
+function friendlyDeleteError(e, label) {
+  const msg = e && e.message ? e.message : String(e);
+  if (/foreign key|violates.*constraint|is still referenced/i.test(msg)) {
+    return `이 ${label}은(는) 이미 다른 데이터(주문/재고/노출상품 등)에서 참조하고 있어 삭제할 수 없습니다. 삭제 대신 "노출/활성"을 꺼서 비활성화하는 걸 권장합니다.`;
+  }
+  return msg;
+}
 
 /* ════════════════════════════════════════════════════════════
    로그인 / 로그아웃
@@ -314,12 +326,14 @@ setInterval(() => {
    ════════════════════════════════════════════════════════════ */
 const TAB_TITLES = {
   dashboard: "대시보드", products: "상품 관리", channels: "채널(폐쇄몰) 관리",
-  orders: "주문 관리", inventory: "재고(PIN) 관리", members: "회원 목록",
+  orders: "주문 관리", inventory: "재고(PIN) 관리", venues: "업장 관리",
+  settlements: "정산", members: "회원 목록",
   myaccount: "내 계정", staff: "관리자 계정 관리",
 };
 const TAB_RENDERERS = {
   dashboard: renderDashboard, products: renderProducts, channels: renderChannels,
-  orders: renderOrders, inventory: renderInventory, members: renderMembers,
+  orders: renderOrders, inventory: renderInventory, venues: renderVenues,
+  settlements: renderSettlements, members: renderMembers,
   myaccount: renderMyAccount, staff: renderStaff,
 };
 
@@ -440,22 +454,24 @@ function statusBadge(status) {
 }
 
 /* ════════════════════════════════════════════════════════════
-   2. 상품 관리
+   2. 상품 관리 — 더블에이치(HHCOMPANY) admin의 상품관리 화면(2026-08 기준)
+   구조를 콕패스 스키마(products에 group_dates 없음)에 맞춰 그대로 이식.
+   추가/수정은 폼으로, 순서변경(▲▼⇈⇊)·노출/개인판매 토글·삭제까지 지원한다.
+   (2026-08-27: 기존 "행 전체 JSON 직접수정" 방식을 실무형 폼으로 교체)
    ════════════════════════════════════════════════════════════ */
+let PRODUCTS_CACHE = [];
+let prodTicketRowCount = 0;
+
+function boolBadge(v) { return v ? `<span class="badge green">ON</span>` : `<span class="badge gray">OFF</span>`; }
+
 async function renderProducts() {
   const main = document.getElementById("main");
   main.innerHTML = `<div class="panel"><div class="panel-head"><h2>상품 목록</h2>
     <div class="toolbar"><button class="btn primary" id="addProductBtn">+ 새 상품</button></div></div>
     <div id="productsTableWrap"><div class="empty">불러오는 중...</div></div>
-    <div class="hint">"편집"은 해당 행의 모든 필드를 JSON으로 직접 수정합니다(tickets/features/tags 포함). id는 새 상품 생성 시에만 지정할 수 있습니다.</div>
+    <div class="hint">▲▼⇈⇊로 노출 순서를 바꿀 수 있습니다(홈페이지 카탈로그 정렬에 반영). "편집"은 권종별 가격까지 폼으로 수정합니다.</div>
   </div>`;
-  document.getElementById("addProductBtn").addEventListener("click", () => {
-    openJsonEditModal({
-      title: "새 상품 추가", table: "products", pkCol: "id", isInsert: true,
-      initial: { id: "", name: "", vname: "", cat: "waterpark", emoji: "🎫", color: "#1B6B3A", gradient: "", tags: [], hot: false, visible: true, desc: "", tickets: [], features: [], sort_order: 0, image_url: "", indiv_price: 0, indiv_sale_enabled: false },
-      onSaved: loadProductsTable,
-    });
-  });
+  document.getElementById("addProductBtn").addEventListener("click", () => openProductModal(null));
   await loadProductsTable();
 }
 
@@ -463,31 +479,196 @@ async function loadProductsTable() {
   const wrap = document.getElementById("productsTableWrap");
   try {
     const rows = await restGet("products", "?select=*&order=sort_order.asc,id.asc");
-    wrap.innerHTML = dtTable(["ID", "상품명", "가격", "개인판매", "노출", "핫딜", "액션"], rows.map(p => `
-      <tr>
+    PRODUCTS_CACHE = rows;
+    wrap.innerHTML = dtTable(["순서", "ID", "상품명", "가격", "개인판매", "노출", "핫딜", "액션"], rows.map((p, i) => {
+      const isFirst = i === 0, isLast = i === rows.length - 1;
+      return `<tr>
+        <td>
+          <div style="display:flex;gap:2px">
+            <button class="btn small" style="padding:2px 6px;${isFirst ? "opacity:.35;cursor:default" : ""}" ${isFirst ? "disabled" : ""} data-act="move" data-id="${esc(p.id)}" data-dir="top" title="맨 위로">⇈</button>
+            <button class="btn small" style="padding:2px 6px;${isFirst ? "opacity:.35;cursor:default" : ""}" ${isFirst ? "disabled" : ""} data-act="move" data-id="${esc(p.id)}" data-dir="-1" title="한 칸 위로">▲</button>
+            <button class="btn small" style="padding:2px 6px;${isLast ? "opacity:.35;cursor:default" : ""}" ${isLast ? "disabled" : ""} data-act="move" data-id="${esc(p.id)}" data-dir="1" title="한 칸 아래로">▼</button>
+            <button class="btn small" style="padding:2px 6px;${isLast ? "opacity:.35;cursor:default" : ""}" ${isLast ? "disabled" : ""} data-act="move" data-id="${esc(p.id)}" data-dir="bottom" title="맨 아래로">⇊</button>
+          </div>
+        </td>
         <td>${esc(p.id)}</td>
-        <td>${esc(p.name)}</td>
+        <td>${esc(p.emoji || "")} ${esc(p.name)}</td>
         <td>${fmtWon(p.indiv_price)}</td>
-        <td>${boolBadge(p.indiv_sale_enabled)}</td>
-        <td>${boolBadge(p.visible)}</td>
+        <td><button class="btn small" data-act="toggle-sale" data-id="${esc(p.id)}" data-val="${!p.indiv_sale_enabled}">${boolBadge(p.indiv_sale_enabled)}</button></td>
+        <td><button class="btn small" data-act="toggle-visible" data-id="${esc(p.id)}" data-val="${!p.visible}">${boolBadge(p.visible)}</button></td>
         <td>${boolBadge(p.hot)}</td>
         <td>
-          <button class="btn small" data-act="toggle-sale" data-id="${esc(p.id)}" data-val="${!p.indiv_sale_enabled}">개인판매 ${p.indiv_sale_enabled ? "끄기" : "켜기"}</button>
           <button class="btn small" data-act="edit" data-id="${esc(p.id)}">편집</button>
+          ${me.role === "admin" ? `<button class="btn small danger" data-act="del" data-id="${esc(p.id)}">삭제</button>` : ""}
         </td>
-      </tr>`));
+      </tr>`;
+    }));
     wrap.querySelectorAll("[data-act=toggle-sale]").forEach(b => b.addEventListener("click", async () => {
       try { await restPatch("products", `id=eq.${b.dataset.id}`, { indiv_sale_enabled: b.dataset.val === "true" }); toast("변경했습니다."); loadProductsTable(); }
       catch (e) { toast(e.message, true); }
     }));
-    wrap.querySelectorAll("[data-act=edit]").forEach(b => b.addEventListener("click", async () => {
-      const row = (await restGet("products", `?id=eq.${b.dataset.id}&select=*`))[0];
-      openJsonEditModal({ title: `상품 편집 — ${row.id}`, table: "products", pkCol: "id", filterQuery: `id=eq.${row.id}`, initial: row, onSaved: loadProductsTable });
+    wrap.querySelectorAll("[data-act=toggle-visible]").forEach(b => b.addEventListener("click", async () => {
+      try { await restPatch("products", `id=eq.${b.dataset.id}`, { visible: b.dataset.val === "true" }); toast("변경했습니다."); loadProductsTable(); }
+      catch (e) { toast(e.message, true); }
+    }));
+    wrap.querySelectorAll("[data-act=edit]").forEach(b => b.addEventListener("click", () => openProductModal(b.dataset.id)));
+    wrap.querySelectorAll("[data-act=del]").forEach(b => b.addEventListener("click", async () => {
+      if (!confirm("이 상품을 영구 삭제할까요? 되돌릴 수 없습니다.\n(이미 주문/재고/노출상품에서 참조 중이면 삭제가 거부됩니다 — 그럴 땐 '노출' 또는 '개인판매'를 꺼서 비활성화하세요.)")) return;
+      try { await restDelete("products", `id=eq.${b.dataset.id}`); toast("삭제했습니다."); loadProductsTable(); }
+      catch (e) { toast(friendlyDeleteError(e, "상품"), true); }
+    }));
+    wrap.querySelectorAll("[data-act=move]").forEach(b => b.addEventListener("click", () => {
+      const { id, dir } = b.dataset;
+      if (dir === "top" || dir === "bottom") moveProductToEdge(id, dir);
+      else moveProductOrder(id, Number(dir));
     }));
   } catch (e) { wrap.innerHTML = `<div class="empty">불러오기 실패: ${esc(e.message)}</div>`; }
 }
 
-function boolBadge(v) { return v ? `<span class="badge green">ON</span>` : `<span class="badge gray">OFF</span>`; }
+async function moveProductOrder(id, dir) {
+  const idx = PRODUCTS_CACHE.findIndex(p => p.id === id);
+  if (idx === -1) return;
+  const swapIdx = idx + dir;
+  if (swapIdx < 0 || swapIdx >= PRODUCTS_CACHE.length) return;
+  const a = PRODUCTS_CACHE[idx], b = PRODUCTS_CACHE[swapIdx];
+  const aOrder = a.sort_order, bOrder = b.sort_order;
+  try {
+    await Promise.all([
+      restPatch("products", `id=eq.${a.id}`, { sort_order: bOrder }),
+      restPatch("products", `id=eq.${b.id}`, { sort_order: aOrder }),
+    ]);
+    loadProductsTable();
+  } catch (e) { toast("순서 변경 실패: " + e.message, true); }
+}
+
+async function moveProductToEdge(id, edge) {
+  const idx = PRODUCTS_CACHE.findIndex(p => p.id === id);
+  if (idx === -1) return;
+  if ((edge === "top" && idx === 0) || (edge === "bottom" && idx === PRODUCTS_CACHE.length - 1)) return;
+  const rows = [...PRODUCTS_CACHE];
+  const [item] = rows.splice(idx, 1);
+  if (edge === "top") rows.unshift(item); else rows.push(item);
+  rows.forEach((p, i) => { p.sort_order = i * 10; });
+  try {
+    await Promise.all(rows.map(p => restPatch("products", `id=eq.${p.id}`, { sort_order: p.sort_order })));
+    toast("순서를 저장했습니다.");
+    loadProductsTable();
+  } catch (e) { toast("순서 변경 실패: " + e.message, true); }
+}
+
+function addProdTicketRow(container, t, r, pr) {
+  const i = prodTicketRowCount++;
+  const div = document.createElement("div");
+  div.style.cssText = "display:flex;gap:6px;align-items:center;margin-bottom:6px";
+  div.innerHTML = `
+    <input placeholder="권종명 (예: 유아)" id="pt-type-${i}" value="${esc(t || "")}" style="flex:1;padding:8px 10px;border:1px solid var(--border);border-radius:7px">
+    <input placeholder="대상연령 (예: 36개월~7세)" id="pt-range-${i}" value="${esc(r || "")}" style="flex:1;padding:8px 10px;border:1px solid var(--border);border-radius:7px">
+    <input type="number" placeholder="단가" id="pt-price-${i}" value="${pr != null ? pr : ""}" style="width:110px;padding:8px 10px;border:1px solid var(--border);border-radius:7px">
+    <button class="btn small danger" type="button" onclick="this.parentElement.remove()">×</button>`;
+  container.appendChild(div);
+}
+
+function openProductModal(id) {
+  const p = id ? PRODUCTS_CACHE.find(x => x.id === id) : null;
+  const isInsert = !id;
+  prodTicketRowCount = 0;
+  openModal(`
+    <h3>${isInsert ? "새 상품 추가" : `상품 편집 — ${esc(p.name)}`}</h3>
+    ${isInsert ? `<div class="field"><label>ID (영문/숫자, 새 상품만 지정 가능)</label><input id="pf-id" placeholder="예: noljasup"></div>` : ""}
+    <div class="field"><label>상품명</label><input id="pf-name" value="${esc(p?.name || "")}"></div>
+    <div class="field"><label>업장명(vname)</label><input id="pf-vname" value="${esc(p?.vname || "")}"></div>
+    <div style="display:flex;gap:12px">
+      <div class="field" style="flex:1"><label>카테고리</label>
+        <select id="pf-cat">
+          <option value="waterpark" ${!p || p.cat === "waterpark" ? "selected" : ""}>워터파크</option>
+          <option value="theme" ${p?.cat === "theme" ? "selected" : ""}>테마파크</option>
+          <option value="experience" ${p?.cat === "experience" ? "selected" : ""}>체험</option>
+        </select>
+      </div>
+      <div class="field" style="flex:1"><label>이모지</label><input id="pf-emoji" value="${esc(p?.emoji || "🎫")}"></div>
+      <div class="field" style="flex:1"><label>색상</label><input id="pf-color" type="color" value="${esc(p?.color || "#1B6B3A")}" style="height:38px;padding:2px"></div>
+    </div>
+    <div class="field"><label>태그 (쉼표로 구분)</label><input id="pf-tags" value="${esc((p?.tags || []).join(", "))}"></div>
+    <div class="field"><label>설명</label><input id="pf-desc" value="${esc(p?.desc || "")}"></div>
+    <div class="field"><label>이미지 URL</label><input id="pf-image" value="${esc(p?.image_url || "")}" placeholder="https://..."></div>
+    <div class="field"><label>특징 (한 줄에 하나씩)</label><textarea id="pf-features" style="min-height:70px">${esc((p?.features || []).join("\n"))}</textarea></div>
+    <div class="field">
+      <label>권종별 가격</label>
+      <div id="pf-ticket-rows"></div>
+      <button class="btn small" type="button" id="pf-addTicketBtn">+ 권종 추가</button>
+    </div>
+    <div style="display:flex;gap:12px">
+      <div class="field" style="flex:1"><label>노출</label>
+        <select id="pf-visible"><option value="true" ${!p || p.visible ? "selected" : ""}>노출</option><option value="false" ${p && !p.visible ? "selected" : ""}>숨김</option></select>
+      </div>
+      <div class="field" style="flex:1"><label>핫딜</label>
+        <select id="pf-hot"><option value="false" ${!p?.hot ? "selected" : ""}>아니오</option><option value="true" ${p?.hot ? "selected" : ""}>예</option></select>
+      </div>
+    </div>
+    <div style="display:flex;gap:12px">
+      <div class="field" style="flex:1"><label>개인판매가</label><input id="pf-indiv-price" type="number" value="${p?.indiv_price ?? ""}"></div>
+      <div class="field" style="flex:1"><label>개인판매 활성화</label>
+        <select id="pf-indiv-enabled"><option value="false" ${!p?.indiv_sale_enabled ? "selected" : ""}>끄기</option><option value="true" ${p?.indiv_sale_enabled ? "selected" : ""}>켜기</option></select>
+      </div>
+    </div>
+    <div class="modal-err" id="pfErr"></div>
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">취소</button><button class="btn primary" id="pfSaveBtn">저장</button></div>
+  `);
+  const rowsWrap = document.getElementById("pf-ticket-rows");
+  const tickets = p?.tickets || [];
+  if (tickets.length) tickets.forEach(t => addProdTicketRow(rowsWrap, t.type, t.range, t.price));
+  else addProdTicketRow(rowsWrap);
+  document.getElementById("pf-addTicketBtn").addEventListener("click", () => addProdTicketRow(rowsWrap));
+  document.getElementById("pfSaveBtn").addEventListener("click", () => saveProductForm(id));
+}
+
+async function saveProductForm(id) {
+  const errEl = document.getElementById("pfErr");
+  const name = document.getElementById("pf-name").value.trim();
+  const vname = document.getElementById("pf-vname").value.trim();
+  if (!name) { errEl.textContent = "상품명을 입력해주세요."; return; }
+  const tickets = [];
+  document.querySelectorAll("#pf-ticket-rows > div").forEach(row => {
+    const inputs = row.querySelectorAll("input");
+    const t = inputs[0].value.trim(), r = inputs[1].value.trim(), pr = parseInt(inputs[2].value, 10) || 0;
+    if (t && pr > 0) tickets.push({ type: t, range: r, price: pr });
+  });
+  const indivEnabled = document.getElementById("pf-indiv-enabled").value === "true";
+  const indivPriceRaw = document.getElementById("pf-indiv-price").value.trim();
+  const indivPrice = indivPriceRaw ? parseInt(indivPriceRaw, 10) : null;
+  if (indivEnabled && (!indivPrice || indivPrice <= 0)) { errEl.textContent = "개인판매를 켜려면 개인판매가를 입력해주세요."; return; }
+  const color = document.getElementById("pf-color").value;
+  const data = {
+    name, vname,
+    cat: document.getElementById("pf-cat").value,
+    emoji: document.getElementById("pf-emoji").value.trim() || "🎫",
+    color, gradient: `linear-gradient(135deg,${color},${color}cc)`,
+    tags: document.getElementById("pf-tags").value.split(",").map(t => t.trim()).filter(Boolean),
+    desc: document.getElementById("pf-desc").value.trim(),
+    image_url: document.getElementById("pf-image").value.trim() || null,
+    features: document.getElementById("pf-features").value.split("\n").map(f => f.trim()).filter(Boolean),
+    tickets,
+    visible: document.getElementById("pf-visible").value === "true",
+    hot: document.getElementById("pf-hot").value === "true",
+    indiv_price: indivPrice,
+    indiv_sale_enabled: indivEnabled,
+  };
+  try {
+    if (id) {
+      await restPatch("products", `id=eq.${id}`, data);
+      toast(`'${name}' 상품을 수정했습니다.`);
+    } else {
+      const newId = document.getElementById("pf-id").value.trim();
+      if (!newId) { errEl.textContent = "ID를 입력해주세요."; return; }
+      data.id = newId;
+      data.sort_order = PRODUCTS_CACHE.length * 10;
+      await restInsert("products", [data]);
+      toast(`'${name}' 상품을 추가했습니다.`);
+    }
+    closeModal();
+    loadProductsTable();
+  } catch (e) { errEl.textContent = e.message; }
+}
 
 /* ════════════════════════════════════════════════════════════
    3. 채널(폐쇄몰) 관리
@@ -522,6 +703,7 @@ async function loadChannelsTable() {
           <button class="btn small" data-act="edit" data-id="${esc(c.id)}">편집</button>
           <button class="btn small" data-act="products" data-id="${esc(c.id)}">노출상품</button>
           <button class="btn small" data-act="billing" data-id="${esc(c.id)}">정산정보</button>
+          ${me.role === "admin" ? `<button class="btn small danger" data-act="del" data-id="${esc(c.id)}">삭제</button>` : ""}
         </td>
       </tr>`));
     wrap.querySelectorAll("[data-act=edit]").forEach(b => b.addEventListener("click", async () => {
@@ -530,6 +712,11 @@ async function loadChannelsTable() {
     }));
     wrap.querySelectorAll("[data-act=billing]").forEach(b => b.addEventListener("click", () => openChannelBilling(b.dataset.id)));
     wrap.querySelectorAll("[data-act=products]").forEach(b => b.addEventListener("click", () => openChannelProducts(b.dataset.id)));
+    wrap.querySelectorAll("[data-act=del]").forEach(b => b.addEventListener("click", async () => {
+      if (!confirm("이 채널(폐쇄몰)을 영구 삭제할까요? 되돌릴 수 없습니다.\n(이미 주문/노출상품/정산정보에서 참조 중이면 삭제가 거부됩니다 — 그럴 땐 '활성'을 꺼서 비활성화하세요.)")) return;
+      try { await restDelete("channels", `id=eq.${b.dataset.id}`); toast("삭제했습니다."); loadChannelsTable(); }
+      catch (e) { toast(friendlyDeleteError(e, "채널"), true); }
+    }));
   } catch (e) { wrap.innerHTML = `<div class="empty">불러오기 실패: ${esc(e.message)}</div>`; }
 }
 
@@ -747,7 +934,7 @@ async function loadInventoryTable() {
     wrap.querySelectorAll("[data-act=del]").forEach(b => b.addEventListener("click", async () => {
       if (!confirm("이 PIN을 영구 삭제할까요? 되돌릴 수 없습니다.")) return;
       try { await restDelete("pin_inventory", `id=eq.${b.dataset.id}`); toast("삭제했습니다."); loadInventoryTable(); }
-      catch (e) { toast(e.message, true); }
+      catch (e) { toast(friendlyDeleteError(e, "PIN"), true); }
     }));
   } catch (e) { wrap.innerHTML = `<div class="empty">불러오기 실패: ${esc(e.message)}</div>`; }
 }
@@ -773,6 +960,301 @@ async function handleCsvUpload(e) {
     toast(`${rows.length}건 등록 완료.`);
     loadInventoryTable();
   } catch (err) { toast("등록 실패: " + err.message, true); }
+}
+
+/* ════════════════════════════════════════════════════════════
+   5-1. 업장 관리 (venues) — 정산의 전제가 되는 마스터 데이터.
+   지금까지 admin에 이 화면 자체가 없어서 venues 테이블을 관리할 방법이
+   없었음(2026-08-25 추가). pin_inventory/orders의 venue_name은 이 테이블과
+   느슨하게(자유 텍스트 매칭) 연결되므로, 업장명은 여기 등록한 이름과
+   정확히 일치시켜야 정산 집계가 맞습니다.
+   ════════════════════════════════════════════════════════════ */
+async function renderVenues() {
+  const main = document.getElementById("main");
+  main.innerHTML = `<div class="panel"><div class="panel-head"><h2>업장 목록</h2>
+    <div class="toolbar"><button class="btn primary" id="addVenueBtn">+ 새 업장</button></div></div>
+    <div id="venuesTableWrap"><div class="empty">불러오는 중...</div></div>
+    <div class="hint">"정산정보"(수수료율·계좌 등 민감정보)는 관리자(admin) 계정만 조회·수정할 수 있습니다.
+    업장명은 재고(PIN)/주문에 기록되는 venue_name과 정확히 같아야 정산 집계에 잡힙니다 — 오타 주의.</div>
+  </div>`;
+  document.getElementById("addVenueBtn").addEventListener("click", () => {
+    openJsonEditModal({
+      title: "새 업장 추가", table: "venues", pkCol: "id", isInsert: true,
+      initial: { name: "", product: "", address: "", color_hex: "#4f8ef7", is_active: true },
+      onSaved: loadVenuesTable,
+    });
+  });
+  await loadVenuesTable();
+}
+
+async function loadVenuesTable() {
+  const wrap = document.getElementById("venuesTableWrap");
+  try {
+    const rows = await restGet("venues", "?select=*&order=name.asc");
+    wrap.innerHTML = dtTable(["ID", "업장명", "상품", "주소", "활성", "액션"], rows.map(v => `
+      <tr>
+        <td>${esc(v.id)}</td><td>${esc(v.name)}</td><td>${esc(v.product || "-")}</td><td>${esc(v.address || "-")}</td>
+        <td>${boolBadge(v.is_active)}</td>
+        <td>
+          <button class="btn small" data-act="edit" data-id="${esc(v.id)}">편집</button>
+          <button class="btn small" data-act="billing" data-name="${esc(v.name)}">정산정보</button>
+          ${me.role === "admin" ? `<button class="btn small danger" data-act="del" data-id="${esc(v.id)}">삭제</button>` : ""}
+        </td>
+      </tr>`));
+    wrap.querySelectorAll("[data-act=edit]").forEach(b => b.addEventListener("click", async () => {
+      const row = (await restGet("venues", `?id=eq.${b.dataset.id}&select=*`))[0];
+      openJsonEditModal({ title: `업장 편집 — ${row.name}`, table: "venues", pkCol: "id", filterQuery: `id=eq.${row.id}`, initial: row, onSaved: loadVenuesTable });
+    }));
+    wrap.querySelectorAll("[data-act=billing]").forEach(b => b.addEventListener("click", () => openVenueBilling(b.dataset.name)));
+    wrap.querySelectorAll("[data-act=del]").forEach(b => b.addEventListener("click", async () => {
+      if (!confirm("이 업장을 영구 삭제할까요? 되돌릴 수 없습니다.\n(정산정보 등 연결된 데이터가 있으면 삭제가 거부될 수 있습니다 — 그럴 땐 '활성'을 꺼서 비활성화하세요.)")) return;
+      try { await restDelete("venues", `id=eq.${b.dataset.id}`); toast("삭제했습니다."); loadVenuesTable(); }
+      catch (e) { toast(friendlyDeleteError(e, "업장"), true); }
+    }));
+  } catch (e) { wrap.innerHTML = `<div class="empty">불러오기 실패: ${esc(e.message)}</div>`; }
+}
+
+async function openVenueBilling(venueName) {
+  let row, exists;
+  try {
+    const rows = await restGet("venue_billing", `?venue_name=eq.${encodeURIComponent(venueName)}&select=*`);
+    exists = rows.length > 0;
+    row = rows[0] || {
+      venue_name: venueName, payout_rate: 0, settle_cycle: "monthly",
+      bank_name: "", bank_account: "", account_holder: "",
+      biz_number: "", tax_email: "", contact: "", phone: "", note: "",
+    };
+  } catch (e) { toast("정산정보 조회 실패(관리자 권한 필요): " + e.message, true); return; }
+  openJsonEditModal({
+    title: `업장 정산정보 — ${venueName}`, table: "venue_billing", pkCol: "venue_name",
+    filterQuery: `venue_name=eq.${encodeURIComponent(venueName)}`, initial: row, isInsert: !exists,
+    onSaved: () => toast("저장했습니다."),
+  });
+}
+
+/* ════════════════════════════════════════════════════════════
+   5-2. 정산 (settlements) — 신규 기능(2026-08-25).
+   기존 admin에는 채널/업장 "수수료율을 저장해두는 칸"만 있었고,
+   실제로 기간별 매출을 집계해서 "이번 달 얼마를 줘야 하는지" 계산하고
+   기록으로 남기는 기능이 없었음 — 이 섹션이 그 공백을 메운다.
+
+   집계 로직: orders(status=paid, paid_at이 기간 내) 합계 - pin_inventory
+   환불(refund_amount, refunded_at이 기간 내) = 순매출. 여기에 업장/채널별
+   정산정보(payout_rate 또는 channel_billing.fee)를 곱해 지급액을 계산한다.
+   "초안 저장"을 누르기 전까지는 DB에 아무것도 기록하지 않는 미리보기다.
+   ════════════════════════════════════════════════════════════ */
+let stPreviewRows = [];
+let stHistFilter = { scope: "", status: "" };
+
+async function renderSettlements() {
+  const main = document.getElementById("main");
+  const today = new Date();
+  const firstOfLastMonth = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+  const lastOfLastMonth = new Date(today.getFullYear(), today.getMonth(), 0);
+  const fmt = d => d.toISOString().slice(0, 10);
+
+  main.innerHTML = `
+    <div class="panel">
+      <div class="panel-head"><h2>정산 집계</h2></div>
+      <div class="toolbar">
+        <label style="font-size:12px;color:var(--text2)">시작일 <input type="date" id="stFrom" value="${fmt(firstOfLastMonth)}"></label>
+        <label style="font-size:12px;color:var(--text2)">종료일 <input type="date" id="stTo" value="${fmt(lastOfLastMonth)}"></label>
+        <select id="stScope"><option value="venue">업장별</option><option value="channel">채널별</option></select>
+        <button class="btn primary" id="stCalcBtn">집계 계산</button>
+      </div>
+      <div class="hint">결제완료(paid) 주문의 결제일시 기준으로 기간 내 매출을 집계합니다(업장별 집계는 같은 기간 PIN 환불액을 차감).
+      정산율은 업장/채널 "정산정보"에 입력된 값을 자동으로 불러오며, 입력이 없으면 0%로 표시됩니다 — 저장 전에 먼저 채워두세요.
+      아직 확정된 계약 수치가 없다면 0%인 채로 두고 금액만 참고용으로 보셔도 됩니다.</div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>집계 결과 (저장 전 미리보기)</h2></div>
+      <div id="stPreviewWrap"><div class="empty">기간을 선택하고 "집계 계산"을 눌러주세요.</div></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>정산 내역</h2>
+        <div class="toolbar">
+          <select id="stHistScope"><option value="">전체 구분</option><option value="venue">업장</option><option value="channel">채널</option></select>
+          <select id="stHistStatus"><option value="">전체 상태</option><option value="draft">초안</option><option value="confirmed">확정</option><option value="paid">지급완료</option></select>
+          <button class="btn" id="stHistFilterBtn">검색</button>
+          <button class="btn" id="stExportBtn">CSV 다운로드</button>
+        </div>
+      </div>
+      <div id="stHistWrap"><div class="empty">불러오는 중...</div></div>
+    </div>
+  `;
+  document.getElementById("stCalcBtn").addEventListener("click", calcSettlementPreview);
+  document.getElementById("stHistFilterBtn").addEventListener("click", loadSettlementHistory);
+  document.getElementById("stExportBtn").addEventListener("click", exportSettlementsCsv);
+  await loadSettlementHistory();
+}
+
+async function calcSettlementPreview() {
+  const from = document.getElementById("stFrom").value;
+  const to = document.getElementById("stTo").value;
+  const scope = document.getElementById("stScope").value;
+  const wrap = document.getElementById("stPreviewWrap");
+  if (!from || !to) { toast("시작일/종료일을 입력하세요.", true); return; }
+  wrap.innerHTML = `<div class="empty">집계 중...</div>`;
+  try {
+    const fromTs = `${from}T00:00:00`, toTs = `${to}T23:59:59`;
+    const [orders, pins] = await Promise.all([
+      restGet("orders", `?status=eq.paid&paid_at=gte.${fromTs}&paid_at=lte.${toTs}&select=venue_name,channel_id,total_amount`),
+      scope === "venue"
+        ? restGet("pin_inventory", `?refunded_at=gte.${fromTs}&refunded_at=lte.${toTs}&select=venue_name,refund_amount`)
+        : Promise.resolve([]),
+    ]);
+
+    const keyOf = o => scope === "venue" ? (o.venue_name || "(업장 미지정)") : (o.channel_id || "직접판매");
+    const groups = {};
+    for (const o of orders) {
+      const k = keyOf(o);
+      groups[k] = groups[k] || { count: 0, gross: 0, refund: 0 };
+      groups[k].count++; groups[k].gross += (o.total_amount || 0);
+    }
+    for (const p of pins) {
+      const k = p.venue_name || "(업장 미지정)";
+      groups[k] = groups[k] || { count: 0, gross: 0, refund: 0 };
+      groups[k].refund += Number(p.refund_amount || 0);
+    }
+
+    const keys = Object.keys(groups);
+    if (!keys.length) { wrap.innerHTML = `<div class="empty">해당 기간에 결제완료 주문이 없습니다.</div>`; return; }
+
+    const rates = {};
+    try {
+      if (scope === "venue") {
+        const inList = keys.map(k => `"${encodeURIComponent(k)}"`).join(",");
+        const vb = await restGet("venue_billing", `?venue_name=in.(${inList})&select=venue_name,payout_rate`);
+        vb.forEach(r => { rates[decodeURIComponent(r.venue_name)] = Number(r.payout_rate || 0); });
+      } else {
+        const inList = keys.map(k => `"${encodeURIComponent(k)}"`).join(",");
+        const cb = await restGet("channel_billing", `?channel_id=in.(${inList})&select=channel_id,fee`);
+        cb.forEach(r => { rates[decodeURIComponent(r.channel_id)] = Number(r.fee || 0); });
+      }
+    } catch { /* 정산정보 테이블 접근 실패(권한 등) 시 정산율 0으로 진행 */ }
+
+    stPreviewRows = keys.map(k => {
+      const g = groups[k];
+      const net = g.gross - g.refund;
+      const rate = rates[k] ?? 0;
+      return {
+        scope_type: scope, scope_key: k, period_start: from, period_end: to,
+        order_count: g.count, gross_amount: g.gross, refund_amount: g.refund,
+        net_amount: net, rate, payout_amount: Math.round(net * rate),
+      };
+    });
+    renderStPreviewTable(wrap);
+  } catch (e) { wrap.innerHTML = `<div class="empty">집계 실패: ${esc(e.message)}</div>`; }
+}
+
+function renderStPreviewTable(wrap) {
+  wrap.innerHTML = `
+    ${dtTable(["대상", "건수", "총매출", "환불액", "순매출", "정산율", "지급액", "정산율 수정"], stPreviewRows.map((r, i) => `
+      <tr>
+        <td>${esc(r.scope_key)}</td><td>${r.order_count}</td><td>${fmtWon(r.gross_amount)}</td>
+        <td>${fmtWon(r.refund_amount)}</td><td>${fmtWon(r.net_amount)}</td>
+        <td>${(r.rate * 100).toFixed(1)}%</td><td id="stPayout${i}">${fmtWon(r.payout_amount)}</td>
+        <td><input type="number" step="0.01" min="0" max="1" data-rate-idx="${i}" value="${r.rate}" style="width:70px"></td>
+      </tr>`))}
+    <div class="modal-actions" style="justify-content:flex-start;margin-top:10px">
+      <button class="btn primary" id="stSaveDraftBtn">이 결과를 정산 내역에 초안으로 저장</button>
+    </div>
+    <div class="hint">정산율(예: 0.7 = 70%)을 표에서 직접 고쳐 다시 계산할 수 있습니다. 저장 전까지는 DB에 아무것도 기록되지 않습니다.</div>
+  `;
+  wrap.querySelectorAll("[data-rate-idx]").forEach(inp => inp.addEventListener("change", () => {
+    const i = Number(inp.dataset.rateIdx);
+    stPreviewRows[i].rate = Number(inp.value) || 0;
+    stPreviewRows[i].payout_amount = Math.round(stPreviewRows[i].net_amount * stPreviewRows[i].rate);
+    document.getElementById(`stPayout${i}`).textContent = fmtWon(stPreviewRows[i].payout_amount);
+  }));
+  document.getElementById("stSaveDraftBtn").addEventListener("click", saveSettlementDrafts);
+}
+
+async function saveSettlementDrafts() {
+  if (!stPreviewRows.length) return;
+  if (!confirm(`${stPreviewRows.length}건을 정산 내역에 "초안" 상태로 저장합니다. 계속할까요?`)) return;
+  try {
+    const rows = stPreviewRows.map(r => ({
+      scope_type: r.scope_type, scope_key: r.scope_key,
+      period_start: r.period_start, period_end: r.period_end,
+      order_count: r.order_count, gross_amount: r.gross_amount, refund_amount: r.refund_amount,
+      net_amount: r.net_amount, rate: r.rate, payout_amount: r.payout_amount,
+      status: "draft", created_by: me.id,
+    }));
+    await restInsert("settlements", rows);
+    toast("정산 내역에 초안으로 저장했습니다.");
+    loadSettlementHistory();
+  } catch (e) { toast("저장 실패: " + e.message, true); }
+}
+
+async function loadSettlementHistory() {
+  const wrap = document.getElementById("stHistWrap");
+  if (!wrap) return;
+  stHistFilter.scope = document.getElementById("stHistScope")?.value || "";
+  stHistFilter.status = document.getElementById("stHistStatus")?.value || "";
+  try {
+    let query = "?select=*&order=period_start.desc,scope_key.asc&limit=300";
+    if (stHistFilter.scope) query += `&scope_type=eq.${stHistFilter.scope}`;
+    if (stHistFilter.status) query += `&status=eq.${stHistFilter.status}`;
+    const rows = await restGet("settlements", query);
+    wrap.innerHTML = dtTable(["기간", "구분", "대상", "건수", "순매출", "정산율", "지급액", "상태", "액션"], rows.map(r => `
+      <tr>
+        <td>${esc(r.period_start)} ~ ${esc(r.period_end)}</td>
+        <td>${r.scope_type === "venue" ? "업장" : "채널"}</td><td>${esc(r.scope_key)}</td>
+        <td>${r.order_count}</td><td>${fmtWon(r.net_amount)}</td><td>${(Number(r.rate) * 100).toFixed(1)}%</td>
+        <td>${fmtWon(r.payout_amount)}</td><td>${settlementStatusBadge(r.status)}</td>
+        <td>
+          ${r.status === "draft" ? `<button class="btn small" data-act="confirm" data-id="${r.id}">확정</button>` : ""}
+          ${r.status === "confirmed" ? `<button class="btn small" data-act="paid" data-id="${r.id}">지급완료 처리</button>` : ""}
+          ${me.role === "admin" ? `<button class="btn small danger" data-act="del" data-id="${r.id}">삭제</button>` : ""}
+        </td>
+      </tr>`));
+    wrap.querySelectorAll("[data-act=confirm]").forEach(b => b.addEventListener("click", async () => {
+      try { await restPatch("settlements", `id=eq.${b.dataset.id}`, { status: "confirmed", confirmed_at: new Date().toISOString() }); toast("확정했습니다."); loadSettlementHistory(); }
+      catch (e) { toast(e.message, true); }
+    }));
+    wrap.querySelectorAll("[data-act=paid]").forEach(b => b.addEventListener("click", async () => {
+      if (!confirm("지급 완료로 표시할까요? 실제 송금은 별도로 진행해야 합니다(이 버튼은 기록용입니다).")) return;
+      try { await restPatch("settlements", `id=eq.${b.dataset.id}`, { status: "paid", paid_at: new Date().toISOString() }); toast("지급완료로 표시했습니다."); loadSettlementHistory(); }
+      catch (e) { toast(e.message, true); }
+    }));
+    wrap.querySelectorAll("[data-act=del]").forEach(b => b.addEventListener("click", async () => {
+      if (!confirm("이 정산 내역을 삭제할까요? 되돌릴 수 없습니다.")) return;
+      try { await restDelete("settlements", `id=eq.${b.dataset.id}`); toast("삭제했습니다."); loadSettlementHistory(); }
+      catch (e) { toast(friendlyDeleteError(e, "정산 내역"), true); }
+    }));
+  } catch (e) { wrap.innerHTML = `<div class="empty">불러오기 실패: ${esc(e.message)}</div>`; }
+}
+
+function settlementStatusBadge(s) {
+  const map = { draft: ["gray", "초안"], confirmed: ["blue", "확정"], paid: ["green", "지급완료"] };
+  const [cls, label] = map[s] || ["gray", s || "-"];
+  return `<span class="badge ${cls}">${esc(label)}</span>`;
+}
+
+async function exportSettlementsCsv() {
+  try {
+    let query = "?select=*&order=period_start.desc,scope_key.asc&limit=2000";
+    if (stHistFilter.scope) query += `&scope_type=eq.${stHistFilter.scope}`;
+    if (stHistFilter.status) query += `&status=eq.${stHistFilter.status}`;
+    const rows = await restGet("settlements", query);
+    if (!rows.length) { toast("내보낼 데이터가 없습니다.", true); return; }
+    const headers = ["기간시작", "기간종료", "구분", "대상", "건수", "총매출", "환불액", "순매출", "정산율", "지급액", "상태", "확정일시", "지급일시"];
+    const lines = [headers.join(",")];
+    for (const r of rows) {
+      lines.push([
+        r.period_start, r.period_end, r.scope_type, r.scope_key, r.order_count,
+        r.gross_amount, r.refund_amount, r.net_amount, r.rate, r.payout_amount,
+        r.status, r.confirmed_at || "", r.paid_at || "",
+      ].map(v => `"${String(v ?? "").replace(/"/g, '""')}"`).join(","));
+    }
+    const blob = new Blob(["﻿" + lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `콕패스_정산내역_${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) { toast("내보내기 실패: " + e.message, true); }
 }
 
 /* ════════════════════════════════════════════════════════════
