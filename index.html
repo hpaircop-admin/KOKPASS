@@ -667,6 +667,7 @@ async function loadChannelsTable() {
           <button class="btn small" data-act="edit" data-id="${esc(c.id)}">편집</button>
           <button class="btn small" data-act="products" data-id="${esc(c.id)}">노출상품</button>
           <button class="btn small" data-act="billing" data-id="${esc(c.id)}">정산정보</button>
+          <button class="btn small" data-act="integration" data-id="${esc(c.id)}">API 연동</button>
           ${me.role === "admin" ? `<button class="btn small danger" data-act="del" data-id="${esc(c.id)}">삭제</button>` : ""}
         </td>
       </tr>`));
@@ -676,6 +677,7 @@ async function loadChannelsTable() {
     }));
     wrap.querySelectorAll("[data-act=billing]").forEach(b => b.addEventListener("click", () => openChannelBilling(b.dataset.id)));
     wrap.querySelectorAll("[data-act=products]").forEach(b => b.addEventListener("click", () => openChannelProducts(b.dataset.id)));
+    wrap.querySelectorAll("[data-act=integration]").forEach(b => b.addEventListener("click", () => openChannelIntegration(b.dataset.id)));
     wrap.querySelectorAll("[data-act=del]").forEach(b => b.addEventListener("click", async () => {
       if (!confirm("이 채널(폐쇄몰)을 영구 삭제할까요? 되돌릴 수 없습니다.\n(이미 주문/노출상품/정산정보에서 참조 중이면 삭제가 거부됩니다 — 그럴 땐 '활성'을 꺼서 비활성화하세요.)")) return;
       try { await restDelete("channels", `id=eq.${b.dataset.id}`); toast("삭제했습니다."); loadChannelsTable(); }
@@ -699,6 +701,7 @@ function openChannelModal(row) {
         <option value="closed_mall" ${v.type === "closed_mall" ? "selected" : ""}>폐쇄몰</option>
         <option value="sns" ${v.type === "sns" ? "selected" : ""}>SNS</option>
         <option value="direct" ${v.type === "direct" ? "selected" : ""}>직접판매</option>
+        <option value="partner_api" ${v.type === "partner_api" ? "selected" : ""}>제휴사 API 연동(B2B)</option>
       </select></div>
       <div class="field"><label>접근방식</label><select id="chAccessMode">
         <option value="public_link" ${v.access_mode === "public_link" ? "selected" : ""}>공개 링크</option>
@@ -788,6 +791,87 @@ async function saveChannelBillingForm(channelId, isInsert) {
     if (isInsert) await restInsert("channel_billing", [{ channel_id: channelId, ...body }]);
     else await restPatch("channel_billing", `channel_id=eq.${channelId}`, body);
     closeModal(); toast("저장했습니다.");
+  } catch (e) { errEl.textContent = e.message; }
+}
+
+// 채널별 API 연동(키즈노트/놀이의발견 등 B2B 파트너) 설정.
+// channels.integration_type(비민감, 상태표시용)과 channel_integration 테이블
+// (api_url/api_key 등 민감정보 — admin 전용 RLS)을 함께 편집·저장한다.
+function genInboundToken() {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function openChannelIntegration(channelId) {
+  let channel, integ;
+  try {
+    channel = (await restGet("channels", `?id=eq.${channelId}&select=id,name,integration_type`))[0];
+    const rows = await restGet("channel_integration", `?channel_id=eq.${channelId}&select=*`);
+    integ = rows[0] || { channel_id: channelId, api_url: "", api_key: "", api_secret: "", merchant_code: "", webhook_secret: "", sandbox_info: "", inbound_token: "" };
+    var isInsert = !rows.length;
+  } catch (e) { toast("연동정보 조회 실패(관리자 권한 필요): " + e.message, true); return; }
+  openChannelIntegrationModal(channelId, channel, integ, isInsert);
+}
+
+function openChannelIntegrationModal(channelId, channel, row, isInsert) {
+  const endpoint = `${SB_URL}/functions/v1/channel-api`;
+  openModal(`
+    <h3>API 연동 — ${esc(channel.name)} (${esc(channelId)})</h3>
+    <div class="hint">외부 파트너(키즈노트, 놀이의발견 등)가 콕패스 재고를 직접 조회·판매·취소할 때 쓰는 연동 설정입니다.
+    아직 실제 연동 전(연동 준비)이면 연동상태만 "준비중"으로 두고 나머지는 비워둬도 됩니다.</div>
+    <div class="field"><label>연동상태</label><select id="ciType">
+      <option value="none" ${channel.integration_type === "none" ? "selected" : ""}>준비중(미연동)</option>
+      <option value="webhook_in" ${channel.integration_type === "webhook_in" ? "selected" : ""}>인바운드만 (채널→콕패스 주문 호출)</option>
+      <option value="api_out" ${channel.integration_type === "api_out" ? "selected" : ""}>아웃바운드만 (콕패스→채널 상태 통보)</option>
+      <option value="both" ${channel.integration_type === "both" ? "selected" : ""}>양방향</option>
+    </select></div>
+    <div class="field"><label>인바운드 인증 토큰 (채널 → 콕패스 호출용)</label>
+      <div class="row2">
+        <input id="ciInboundToken" value="${esc(row.inbound_token || "")}" readonly placeholder="미발급">
+        <button type="button" class="btn small" id="ciIssueBtn">${row.inbound_token ? "토큰 재발급" : "토큰 발급"}</button>
+      </div>
+      <div class="hint">엔드포인트: ${esc(endpoint)} · 호출 시 <code>Authorization: Bearer &lt;토큰&gt;</code> 헤더 필요</div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>연동사 API URL (아웃바운드용)</label><input id="ciApiUrl" value="${esc(row.api_url || "")}" placeholder="https://..."></div>
+      <div class="field"><label>Webhook Secret</label><input id="ciWebhookSecret" value="${esc(row.webhook_secret || "")}"></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>API Key</label><input id="ciApiKey" value="${esc(row.api_key || "")}"></div>
+      <div class="field"><label>API Secret</label><input id="ciApiSecret" value="${esc(row.api_secret || "")}"></div>
+    </div>
+    <div class="field"><label>가맹점 코드(merchant code)</label><input id="ciMerchantCode" value="${esc(row.merchant_code || "")}"></div>
+    <div class="field"><label>샌드박스/테스트 정보</label><textarea id="ciSandboxInfo">${esc(row.sandbox_info || "")}</textarea></div>
+    <div class="modal-err" id="ciErr"></div>
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">취소</button><button class="btn primary" id="ciSaveBtn">저장</button></div>
+  `);
+  document.getElementById("ciIssueBtn").addEventListener("click", () => {
+    const cur = document.getElementById("ciInboundToken");
+    if (cur.value && !confirm("토큰을 재발급하면 기존 토큰으로의 호출은 즉시 인증 실패로 바뀝니다. 계속할까요?")) return;
+    cur.value = genInboundToken();
+  });
+  document.getElementById("ciSaveBtn").addEventListener("click", () => saveChannelIntegrationForm(channelId, isInsert));
+}
+
+async function saveChannelIntegrationForm(channelId, isInsert) {
+  const errEl = document.getElementById("ciErr");
+  errEl.textContent = "";
+  const integType = document.getElementById("ciType").value;
+  const body = {
+    api_url: document.getElementById("ciApiUrl").value.trim(),
+    api_key: document.getElementById("ciApiKey").value.trim(),
+    api_secret: document.getElementById("ciApiSecret").value.trim(),
+    merchant_code: document.getElementById("ciMerchantCode").value.trim(),
+    webhook_secret: document.getElementById("ciWebhookSecret").value.trim(),
+    sandbox_info: document.getElementById("ciSandboxInfo").value.trim(),
+    inbound_token: document.getElementById("ciInboundToken").value.trim() || null,
+  };
+  try {
+    await restPatch("channels", `id=eq.${channelId}`, { integration_type: integType });
+    if (isInsert) await restInsert("channel_integration", [{ channel_id: channelId, ...body }]);
+    else await restPatch("channel_integration", `channel_id=eq.${channelId}`, body);
+    closeModal(); toast("저장했습니다."); loadChannelsTable();
   } catch (e) { errEl.textContent = e.message; }
 }
 
