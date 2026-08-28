@@ -142,6 +142,7 @@
     <div class="sb-item" data-tab="orders">주문 관리</div>
     <div class="sb-item" data-tab="inventory">재고(PIN) 관리</div>
     <div class="sb-item" data-tab="venues">업장 관리</div>
+    <div class="sb-item" data-tab="reservations">예약(단체) 관리</div>
     <div class="sb-group">정산</div>
     <div class="sb-item" data-tab="settlements">정산</div>
     <div class="sb-group">회원</div>
@@ -360,12 +361,14 @@ setInterval(() => {
 const TAB_TITLES = {
   dashboard: "대시보드", products: "상품 관리", channels: "채널(폐쇄몰) 관리",
   orders: "주문 관리", inventory: "재고(PIN) 관리", venues: "업장 관리",
+  reservations: "예약(단체) 관리",
   settlements: "정산", members: "회원 목록", blog: "블로그 관리",
   myaccount: "내 계정", staff: "관리자 계정 관리", msgsettings: "환경설정(문자·카톡)",
 };
 const TAB_RENDERERS = {
   dashboard: renderDashboard, products: renderProducts, channels: renderChannels,
   orders: renderOrders, inventory: renderInventory, venues: renderVenues,
+  reservations: renderReservations,
   settlements: renderSettlements, members: renderMembers, blog: renderBlog,
   myaccount: renderMyAccount, staff: renderStaff, msgsettings: renderMsgSettings,
 };
@@ -1821,6 +1824,227 @@ async function saveVenueBillingForm(venueName, isInsert) {
     else await restPatch("venue_billing", `venue_name=eq.${encodeURIComponent(venueName)}`, body);
     closeModal(); toast("저장했습니다.");
   } catch (e) { errEl.textContent = e.message; }
+}
+
+/* ════════════════════════════════════════════════════════════
+   5-1b. 예약(단체) 관리 (reservations) — 더블에이치 admin 그대로 카피(2026-08-28).
+   콕패스는 지금 개인(FIT) 판매가 주력이라 당장 쓰이진 않지만, 향후 단체(B2B)
+   판매를 열거나 SaaS로 다른 여행사에 팔 때를 대비해 구조를 먼저 이식해둠.
+   백엔드(reservations 테이블 + sheet-sync 구글시트 동기화 Edge Function)는
+   이미 만들어져 있음 — 이 화면은 그 위에 올라가는 관리 UI.
+
+   더블에이치 원본과 다른 점(의도적 — 그대로 베끼면 오히려 틀린 데이터가 됨):
+   - 업장/담당자/협력사 드롭다운이 더블에이치 자체 업장·직원·대행사 이름으로
+     고정되어 있었음 → 콕패스엔 해당 없는 값이라 자유 입력(텍스트)으로 바꿈.
+   - 문자 발송은 카카오 알림톡 템플릿(승인 필요) 대신, 이미 만들어둔 SOLAPI
+     문자 발송(sendSolapiSms)만 우선 연결. 콕패스 전용 단체예약 알림톡
+     템플릿을 승인받으면 나중에 추가 가능.
+   ════════════════════════════════════════════════════════════ */
+async function renderReservations() {
+  const main = document.getElementById("main");
+  main.innerHTML = `<div class="panel"><div class="panel-head"><h2>예약(단체) 목록</h2>
+    <div class="toolbar"><button class="btn primary" id="addResvBtn">+ 새 예약</button></div></div>
+    <div id="resvTableWrap"><div class="empty">불러오는 중...</div></div>
+    <div class="hint">단체(B2B) 예약을 등록·관리합니다. 구글시트 자동연동(sheet-sync)이 연결되면
+    시트에서 들어온 예약도 여기 함께 표시됩니다(수기 등록 건은 자동연동이 덮어쓰지 않음).</div>
+  </div>`;
+  document.getElementById("addResvBtn").addEventListener("click", () => openReservationModal(null));
+  await loadReservationsTable();
+}
+
+async function loadReservationsTable() {
+  const wrap = document.getElementById("resvTableWrap");
+  try {
+    const rows = await restGet("reservations", "?select=*&order=event_date.desc&limit=500");
+    wrap.innerHTML = dtTable(
+      ["행사일", "업장", "단체명", "인솔자", "연락처", "인원", "1인 금액", "매출액", "식사", "상태", "문자", "액션"],
+      rows.map(r => `
+      <tr>
+        <td>${esc((r.event_date || "").slice(0, 10))}</td>
+        <td>${esc(r.venue_name || "-")}</td>
+        <td>${esc(r.group_name)}</td>
+        <td>${esc(r.leader_name || "-")}</td>
+        <td>${esc(r.phone || "-")}</td>
+        <td>${r.total_count ?? 0}명</td>
+        <td>${fmtWon(r.ticket_price)}</td>
+        <td>${fmtWon(r.sales_amount)}</td>
+        <td>${r.meal_type && r.meal_type !== "X" ? esc(r.meal_type) : "-"}</td>
+        <td>${esc(r.status || "confirmed")}</td>
+        <td>${r.sms_sent ? `<span class="badge green">발송됨</span>` : `<span class="badge gray">-</span>`}</td>
+        <td>
+          <button class="btn small" data-act="edit" data-id="${esc(r.id)}">편집</button>
+          <button class="btn small" data-act="sms" data-id="${esc(r.id)}">문자</button>
+          ${me.role === "admin" ? `<button class="btn small danger" data-act="del" data-id="${esc(r.id)}">삭제</button>` : ""}
+        </td>
+      </tr>`));
+    wrap.querySelectorAll("[data-act=edit]").forEach(b => b.addEventListener("click", async () => {
+      const row = (await restGet("reservations", `?id=eq.${b.dataset.id}&select=*`))[0];
+      openReservationModal(row);
+    }));
+    wrap.querySelectorAll("[data-act=sms]").forEach(b => b.addEventListener("click", async () => {
+      const row = (await restGet("reservations", `?id=eq.${b.dataset.id}&select=*`))[0];
+      openReservationSmsModal(row);
+    }));
+    wrap.querySelectorAll("[data-act=del]").forEach(b => b.addEventListener("click", async () => {
+      if (!confirm("이 예약을 영구 삭제할까요? 되돌릴 수 없습니다.")) return;
+      try { await restDelete("reservations", `id=eq.${b.dataset.id}`); toast("삭제했습니다."); loadReservationsTable(); }
+      catch (e) { toast(friendlyDeleteError(e, "예약"), true); }
+    }));
+  } catch (e) { wrap.innerHTML = `<div class="empty">불러오기 실패: ${esc(e.message)}</div>`; }
+}
+
+function openReservationModal(row) {
+  const isInsert = !row;
+  const r = row || {
+    event_date: "", venue_name: "", group_name: "", leader_name: "", phone: "",
+    group_type: "학교", ticket_type: "초등", student_count: 0, escort_count: 0,
+    ticket_price: 20000, meal_type: "X", manager_name: "", partner_name: "", note: "", bus: "",
+  };
+  openModal(`
+    <h3>${isInsert ? "새 예약 등록" : `예약 편집 — ${esc(r.group_name)}`}</h3>
+    <div class="row2">
+      <div class="field"><label>행사일</label><input id="rvDate" type="date" value="${esc((r.event_date || "").slice(0, 10))}"></div>
+      <div class="field"><label>업장</label><input id="rvVenue" value="${esc(r.venue_name || "")}" placeholder="업장명을 입력하세요"></div>
+    </div>
+    <div class="field"><label>단체명</label><input id="rvGname" value="${esc(r.group_name || "")}" placeholder="예) OO초등학교"></div>
+    <div class="row2">
+      <div class="field"><label>인솔자</label><input id="rvLeader" value="${esc(r.leader_name || "")}"></div>
+      <div class="field"><label>연락처</label><input id="rvPhone" value="${esc(r.phone || "")}" placeholder="010-0000-0000"></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>단체구분</label>
+        <select id="rvGtype">${["체육관", "복지관", "종교", "어린이집", "유치원", "학교", "군인", "기타"].map(o => `<option ${r.group_type === o ? "selected" : ""}>${o}</option>`).join("")}</select>
+      </div>
+      <div class="field"><label>권종</label>
+        <select id="rvTtype">${["유아", "초등", "중고", "성인"].map(o => `<option ${r.ticket_type === o ? "selected" : ""}>${o}</option>`).join("")}</select>
+      </div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>학생 인원</label><input id="rvStudent" type="number" min="0" value="${r.student_count ?? 0}"></div>
+      <div class="field"><label>인솔자 인원</label><input id="rvEscort" type="number" min="0" value="${r.escort_count ?? 0}"></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>입장료(1인)</label><input id="rvPrice" type="number" min="0" value="${r.ticket_price ?? 0}"></div>
+      <div class="field"><label>식사여부</label>
+        <select id="rvMeal">
+          <option value="X" ${(!r.meal_type || r.meal_type === "X") ? "selected" : ""}>없음</option>
+          <option value="단체식" ${r.meal_type === "단체식" ? "selected" : ""}>단체식</option>
+          <option value="도시락" ${r.meal_type === "도시락" ? "selected" : ""}>도시락</option>
+        </select>
+      </div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>담당자</label><input id="rvManager" value="${esc(r.manager_name || "")}" placeholder="콕패스 담당자 이름"></div>
+      <div class="field"><label>협력사(있으면)</label><input id="rvPartner" value="${esc(r.partner_name || "")}"></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>버스</label><input id="rvBus" value="${esc(r.bus || "")}"></div>
+      <div class="field"><label>상태</label>
+        <select id="rvStatus">
+          <option value="confirmed" ${(!r.status || r.status === "confirmed") ? "selected" : ""}>확정</option>
+          <option value="pending" ${r.status === "pending" ? "selected" : ""}>대기</option>
+          <option value="cancelled" ${r.status === "cancelled" ? "selected" : ""}>취소</option>
+        </select>
+      </div>
+    </div>
+    <div class="field"><label>비고</label><input id="rvNote" value="${esc(r.note || "")}" placeholder="특이사항"></div>
+    <div class="modal-err" id="rvErr"></div>
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">취소</button><button class="btn primary" id="rvSaveBtn">저장</button></div>
+  `);
+  document.getElementById("rvSaveBtn").addEventListener("click", () => saveReservationForm(isInsert ? null : r.id));
+}
+
+async function saveReservationForm(id) {
+  const errEl = document.getElementById("rvErr");
+  errEl.textContent = "";
+  const gname = document.getElementById("rvGname").value.trim();
+  const date = document.getElementById("rvDate").value;
+  if (!gname) { errEl.textContent = "단체명을 입력하세요."; return; }
+  if (!date) { errEl.textContent = "행사일을 입력하세요."; return; }
+  // total_count/sales_amount는 DB가 자동 계산하는 컬럼이라 보내면 안 됨(더블에이치 원본과 동일한 제약).
+  const body = {
+    event_date: date,
+    event_month: new Date(date).getMonth() + 1,
+    reserved_date: new Date().toISOString().split("T")[0],
+    venue_name: document.getElementById("rvVenue").value.trim(),
+    group_name: gname,
+    leader_name: document.getElementById("rvLeader").value.trim(),
+    phone: document.getElementById("rvPhone").value.trim(),
+    group_type: document.getElementById("rvGtype").value,
+    ticket_type: document.getElementById("rvTtype").value,
+    student_count: parseInt(document.getElementById("rvStudent").value, 10) || 0,
+    escort_count: parseInt(document.getElementById("rvEscort").value, 10) || 0,
+    ticket_price: parseInt(document.getElementById("rvPrice").value, 10) || 0,
+    meal_type: document.getElementById("rvMeal").value,
+    manager_name: document.getElementById("rvManager").value.trim(),
+    partner_name: document.getElementById("rvPartner").value.trim(),
+    bus: document.getElementById("rvBus").value.trim(),
+    status: document.getElementById("rvStatus").value,
+    note: document.getElementById("rvNote").value.trim(),
+  };
+  try {
+    if (!id) await restInsert("reservations", [{ ...body, data_source: "manual" }]);
+    else await restPatch("reservations", `id=eq.${id}`, body);
+    closeModal(); toast("저장했습니다."); loadReservationsTable();
+  } catch (e) { errEl.textContent = e.message; }
+}
+
+// 예약 관련 문자 5종 — 더블에이치 admin의 buildSmsMessage()를 그대로 옮기되
+// 회사명만 "더블에이치컴퍼니" → "콕패스"로 바꿈. 카카오 알림톡 템플릿은
+// 아직 콕패스 단체예약용으로 승인받은 게 없어서, 우선 SOLAPI 문자(SMS)로만 발송.
+function buildGroupSmsMessage(r, type) {
+  const dt = (r.event_date || "").slice(0, 10);
+  const venue = r.venue_name || "업장";
+  const name = r.group_name;
+  const leader = r.leader_name ? r.leader_name + " 선생님" : "담당자님";
+  const people = String(r.total_count ?? 0);
+  const meal = r.meal_type;
+  switch (type) {
+    case "confirm":
+      return `안녕하세요 ${name} ${leader} 😊\n콕패스입니다.\n단체 예약이 확인되었습니다.\n\n📅 행사일: ${dt}\n🏟️ 업장: ${venue}\n👥 인원: ${people}명${meal && meal !== "X" ? "\n🍽️ 식사: " + meal : ""}\n\n변경사항이 있으시면 미리 알려주세요.\n감사합니다 🙏`;
+    case "before2":
+      return `안녕하세요 ${name} ${leader} 😊\n${dt} 행사 안내드립니다.\n\n📅 행사일: ${dt}\n🏟️ 업장: ${venue}\n👥 인원: ${people}명\n\n원활한 진행을 위해 아래 내용을 회신 부탁드립니다.\n① 학생 남/여, 인솔 남/여 인원 구분해서 알려주세요\n② 단체식 신청 여부 확인 부탁드립니다 (신청/미신청)\n\n입장 시 단체명 말씀해 주시면 됩니다.`;
+    case "remind":
+      return `안녕하세요 ${name} ${leader} 😊\n내일 행사 안내드립니다.\n\n📅 행사일: ${dt}\n🏟️ 업장: ${venue}\n👥 인원: ${people}명\n\n입장 시 단체명 말씀해 주시면 됩니다.\n\n내일 뵙겠습니다! 😄`;
+    case "today":
+      return `안녕하세요 ${name} ${leader}!\n오늘 ${venue} 방문 감사드립니다 😊\n\n✅ 입장 안내\n  - 매표소에서 단체명 말씀해 주세요\n  - 인원: ${people}명${meal && meal !== "X" ? "\n  - 식사: " + meal + " 준비되어 있습니다" : ""}\n\n즐거운 하루 되세요! 🎉`;
+    case "meal":
+      if (!meal || meal === "X") return `${name}은(는) 식사 없음으로 등록되어 있습니다.`;
+      return `안녕하세요 ${name} ${leader} 😊\n식사 안내드립니다.\n\n🍽️ 식사 유형: ${meal}\n👥 인원: ${people}명\n📅 행사일: ${dt}\n\n감사합니다 🙏`;
+    default: return "";
+  }
+}
+
+function openReservationSmsModal(r) {
+  if (!r.phone) { toast("연락처가 없는 예약입니다.", true); return; }
+  const types = [
+    ["confirm", "예약확정 안내"], ["before2", "행사 2일 전 확인요청"],
+    ["remind", "행사 전날 안내"], ["today", "당일 안내"], ["meal", "식사 안내"],
+  ];
+  openModal(`
+    <h3>문자 발송 — ${esc(r.group_name)}</h3>
+    <div class="field"><label>메시지 종류</label>
+      <select id="rvSmsType">${types.map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select>
+    </div>
+    <div class="field"><label>미리보기</label><textarea id="rvSmsPreview" rows="8" readonly></textarea></div>
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">취소</button><button class="btn primary" id="rvSmsSendBtn">발송</button></div>
+  `);
+  const sel = document.getElementById("rvSmsType");
+  const preview = document.getElementById("rvSmsPreview");
+  const updatePreview = () => { preview.value = buildGroupSmsMessage(r, sel.value); };
+  sel.addEventListener("change", updatePreview);
+  updatePreview();
+  document.getElementById("rvSmsSendBtn").addEventListener("click", async () => {
+    const type = sel.value;
+    const ok = await sendSolapiSms(r.phone, preview.value);
+    if (!ok) return;
+    closeModal();
+    const patch = type === "before2"
+      ? { sms_sent_before2: true, sms_sent_before2_at: new Date().toISOString() }
+      : { sms_sent: true, sms_sent_at: new Date().toISOString() };
+    try { await restPatch("reservations", `id=eq.${r.id}`, patch); } catch (_e) { /* 발송은 됐으니 이력만 못 남긴 것 — 무시 */ }
+    loadReservationsTable();
+  });
 }
 
 /* ════════════════════════════════════════════════════════════
