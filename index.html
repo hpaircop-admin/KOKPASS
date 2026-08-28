@@ -149,6 +149,8 @@
     <div class="sb-item" data-tab="members">회원 목록</div>
     <div class="sb-group">콘텐츠</div>
     <div class="sb-item" data-tab="blog">블로그 관리</div>
+    <div class="sb-item" data-tab="inquiries">예약 신청 알림</div>
+    <div class="sb-item" data-tab="board">문의게시판</div>
     <div class="sb-group">설정</div>
     <div class="sb-item" data-tab="myaccount">내 계정</div>
     <div class="sb-item" id="staffNavItem" data-tab="staff">관리자 계정 관리</div>
@@ -363,6 +365,7 @@ const TAB_TITLES = {
   orders: "주문 관리", inventory: "재고(PIN) 관리", venues: "업장 관리",
   reservations: "예약(단체) 관리",
   settlements: "정산", members: "회원 목록", blog: "블로그 관리",
+  inquiries: "예약 신청 알림", board: "문의게시판",
   myaccount: "내 계정", staff: "관리자 계정 관리", msgsettings: "환경설정(문자·카톡)",
 };
 const TAB_RENDERERS = {
@@ -370,6 +373,7 @@ const TAB_RENDERERS = {
   orders: renderOrders, inventory: renderInventory, venues: renderVenues,
   reservations: renderReservations,
   settlements: renderSettlements, members: renderMembers, blog: renderBlog,
+  inquiries: renderInquiries, board: renderBoard,
   myaccount: renderMyAccount, staff: renderStaff, msgsettings: renderMsgSettings,
 };
 
@@ -2044,6 +2048,133 @@ function openReservationSmsModal(r) {
       : { sms_sent: true, sms_sent_at: new Date().toISOString() };
     try { await restPatch("reservations", `id=eq.${r.id}`, patch); } catch (_e) { /* 발송은 됐으니 이력만 못 남긴 것 — 무시 */ }
     loadReservationsTable();
+  });
+}
+
+/* ════════════════════════════════════════════════════════════
+   5-1c. 예약 신청 알림(web_inquiries) / 문의게시판(board_posts) — 더블에이치
+   admin 그대로 카피(2026-08-28). 원래는 홈페이지의 공개 신청폼(비회원, 비밀번호로
+   본인 글 확인)에서 들어오는 글을 admin에서 보고 답변 다는 화면.
+   콕패스 웹사이트엔 아직 이 신청폼 자체가 없어서 지금은 목록이 비어있지만,
+   나중에 웹사이트 작업 때 신청폼만 만들면 바로 연결됨 — admin·DB 구조는 먼저 준비.
+
+   더블에이치 원본과 다른 점: 원본은 이 두 테이블을 anon(로그인 없는 방문자)이
+   전부 조회·수정·삭제까지 할 수 있는 상태였음(남의 문의글·전화번호가 다 보이는
+   미해결 보안 구멍) — 콕패스는 anon은 글쓰기만 가능하고, 조회·답변·삭제는
+   staff 로그인이 있어야만 되도록 잠가서 만듦.
+   ════════════════════════════════════════════════════════════ */
+async function renderInquiries() {
+  const main = document.getElementById("main");
+  main.innerHTML = `<div class="panel"><div class="panel-head"><h2>예약 신청 알림</h2></div>
+    <div id="inqTableWrap"><div class="empty">불러오는 중...</div></div>
+    <div class="hint">홈페이지 "단체 예약 신청" 폼으로 접수된 글입니다(폼은 아직 웹사이트에 없음 — 준비 중).
+    "예약으로 등록"을 누르면 예약(단체) 관리에 정식으로 추가됩니다.</div>
+  </div>`;
+  await loadInquiriesTable();
+}
+
+async function loadInquiriesTable() {
+  const wrap = document.getElementById("inqTableWrap");
+  try {
+    const rows = await restGet("web_inquiries", "?select=*&order=created_at.desc&limit=300");
+    wrap.innerHTML = dtTable(
+      ["신청일시", "단체명", "업장", "연락처", "행사희망일", "인원", "상태", "처리"],
+      rows.map(r => `
+      <tr>
+        <td>${esc(fmtDate(r.created_at))}</td>
+        <td>${esc(r.group_name)}</td>
+        <td>${esc(r.venue_name || "-")}</td>
+        <td>${esc(r.phone || "-")}</td>
+        <td>${esc(r.event_date || "-")}</td>
+        <td>${r.student_count ?? 0}명</td>
+        <td>${esc(r.status || "new")}</td>
+        <td>
+          <button class="btn small" data-act="reply" data-id="${esc(r.id)}">답변</button>
+          <button class="btn small" data-act="toResv" data-id="${esc(r.id)}">예약으로 등록</button>
+          ${me.role === "admin" ? `<button class="btn small danger" data-act="del" data-id="${esc(r.id)}">삭제</button>` : ""}
+        </td>
+      </tr>`));
+    wrap.querySelectorAll("[data-act=reply]").forEach(b => b.addEventListener("click", async () => {
+      const row = (await restGet("web_inquiries", `?id=eq.${b.dataset.id}&select=*`))[0];
+      openReplyModal("web_inquiries", row, loadInquiriesTable);
+    }));
+    wrap.querySelectorAll("[data-act=toResv]").forEach(b => b.addEventListener("click", async () => {
+      const row = (await restGet("web_inquiries", `?id=eq.${b.dataset.id}&select=*`))[0];
+      closeModal();
+      openReservationModal({
+        event_date: row.event_date || "", venue_name: row.venue_name || "", group_name: row.group_name,
+        leader_name: row.leader_name || "", phone: row.phone || "", group_type: row.group_type || "학교",
+        ticket_type: row.ticket_type || "초등", student_count: row.student_count || 0, escort_count: 0,
+        ticket_price: row.ticket_price || 20000, meal_type: row.meal_type || "X", manager_name: "", partner_name: "",
+        note: row.note || "", bus: "",
+      });
+    }));
+    wrap.querySelectorAll("[data-act=del]").forEach(b => b.addEventListener("click", async () => {
+      if (!confirm("이 신청글을 영구 삭제할까요?")) return;
+      try { await restDelete("web_inquiries", `id=eq.${b.dataset.id}`); toast("삭제했습니다."); loadInquiriesTable(); }
+      catch (e) { toast(friendlyDeleteError(e, "예약 신청"), true); }
+    }));
+  } catch (e) { wrap.innerHTML = `<div class="empty">불러오기 실패: ${esc(e.message)}</div>`; }
+}
+
+async function renderBoard() {
+  const main = document.getElementById("main");
+  main.innerHTML = `<div class="panel"><div class="panel-head"><h2>문의게시판</h2></div>
+    <div id="boardTableWrap"><div class="empty">불러오는 중...</div></div>
+    <div class="hint">홈페이지 문의게시판 글입니다(게시판 자체는 아직 웹사이트에 없음 — 준비 중).</div>
+  </div>`;
+  await loadBoardTable();
+}
+
+async function loadBoardTable() {
+  const wrap = document.getElementById("boardTableWrap");
+  try {
+    const rows = await restGet("board_posts", "?select=*&order=created_at.desc&limit=300");
+    wrap.innerHTML = dtTable(
+      ["제목", "작성자", "연락처", "작성일", "상태", "처리"],
+      rows.map(r => `
+      <tr>
+        <td>${esc(r.title)}</td>
+        <td>${esc(r.name)}</td>
+        <td>${esc(r.phone || "-")}</td>
+        <td>${esc(fmtDate(r.created_at))}</td>
+        <td>${esc(r.status || "pending")}</td>
+        <td>
+          <button class="btn small" data-act="reply" data-id="${esc(r.id)}">답변</button>
+          ${me.role === "admin" ? `<button class="btn small danger" data-act="del" data-id="${esc(r.id)}">삭제</button>` : ""}
+        </td>
+      </tr>`));
+    wrap.querySelectorAll("[data-act=reply]").forEach(b => b.addEventListener("click", async () => {
+      const row = (await restGet("board_posts", `?id=eq.${b.dataset.id}&select=*`))[0];
+      openReplyModal("board_posts", row, loadBoardTable);
+    }));
+    wrap.querySelectorAll("[data-act=del]").forEach(b => b.addEventListener("click", async () => {
+      if (!confirm("이 글을 영구 삭제할까요?")) return;
+      try { await restDelete("board_posts", `id=eq.${b.dataset.id}`); toast("삭제했습니다."); loadBoardTable(); }
+      catch (e) { toast(friendlyDeleteError(e, "문의글"), true); }
+    }));
+  } catch (e) { wrap.innerHTML = `<div class="empty">불러오기 실패: ${esc(e.message)}</div>`; }
+}
+
+// 예약 신청 알림 / 문의게시판 공용 답변 모달
+function openReplyModal(table, row, onDone) {
+  openModal(`
+    <h3>${table === "board_posts" ? esc(row.title) : esc(row.group_name)} — 답변</h3>
+    <div class="field"><label>원본 내용</label><textarea readonly rows="4">${esc(row.content || row.note || "-")}</textarea></div>
+    <div class="field"><label>답변</label><textarea id="replyText" rows="6">${esc(row.admin_reply || "")}</textarea></div>
+    <div class="modal-err" id="replyErr"></div>
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">취소</button><button class="btn primary" id="replySaveBtn">답변 저장</button></div>
+  `);
+  document.getElementById("replySaveBtn").addEventListener("click", async () => {
+    const text = document.getElementById("replyText").value.trim();
+    if (!text) { document.getElementById("replyErr").textContent = "답변 내용을 입력하세요."; return; }
+    try {
+      await restPatch(table, `id=eq.${row.id}`, {
+        admin_reply: text, replied_at: new Date().toISOString(),
+        status: table === "board_posts" ? "answered" : "replied",
+      });
+      closeModal(); toast("답변을 저장했습니다."); onDone();
+    } catch (e) { document.getElementById("replyErr").textContent = e.message; }
   });
 }
 
