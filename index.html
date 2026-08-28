@@ -90,15 +90,18 @@
   .empty{padding:30px;text-align:center;color:var(--text3);font-size:13px;}
   .hint{font-size:11.5px;color:var(--text3);margin-top:6px;line-height:1.5;}
 
+  /* ── 폼 필드(.field/.row2) — 원래 모달 전용이었으나, 환경설정처럼 패널(#main)에
+     직접 그리는 화면에서도 재사용할 수 있도록 일반 규칙을 추가하고 .modal 안에서는
+     기존 상세 규칙이 덮어쓴다 ───────────────────────── */
+  .field{margin-bottom:12px;}
+  .field label{display:block;font-size:12px;color:var(--text2);margin-bottom:5px;}
+  .field input,.field select,.field textarea{width:100%;padding:9px 11px;border:1px solid var(--border);border-radius:7px;}
+  .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
   /* ── 모달 ───────────────────────── */
   #modalOverlay{position:fixed;inset:0;background:rgba(10,14,24,.5);display:none;align-items:flex-start;justify-content:center;padding:5vh 16px;z-index:50;overflow-y:auto;}
   .modal{background:#fff;border-radius:12px;width:100%;max-width:560px;padding:22px 24px;}
   .modal h3{margin:0 0 16px;font-size:16px;}
-  .modal .field{margin-bottom:12px;}
-  .modal .field label{display:block;font-size:12px;color:var(--text2);margin-bottom:5px;}
-  .modal .field input,.modal .field select,.modal .field textarea{width:100%;padding:9px 11px;border:1px solid var(--border);border-radius:7px;}
   .modal .field textarea{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;min-height:220px;}
-  .modal .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
   .modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px;}
   .modal-err{color:var(--red);font-size:12px;margin-top:8px;min-height:14px;}
 
@@ -148,6 +151,7 @@
     <div class="sb-group">설정</div>
     <div class="sb-item" data-tab="myaccount">내 계정</div>
     <div class="sb-item" id="staffNavItem" data-tab="staff">관리자 계정 관리</div>
+    <div class="sb-item" id="msgNavItem" data-tab="msgsettings">환경설정(문자·카톡)</div>
   </div>
 
   <div id="content">
@@ -164,6 +168,8 @@
 
 <div id="modalOverlay"><div class="modal" id="modalBox"></div></div>
 <div id="toast"></div>
+<!-- MMS 바코드 이미지 렌더링 전용 숨김 SVG (renderBarcodePng에서 사용) -->
+<svg id="hiddenBarcodeSvg" style="position:absolute;left:-9999px;top:-9999px;"></svg>
 
 <script>
 "use strict";
@@ -177,6 +183,23 @@ const SESSION_KEY = "kp_admin_session";
 // ticket.html(바코드 확인 페이지)이 실제로 배포되는 도메인. pin-admin Edge Function의
 // SITE_URL 환경변수와 반드시 같은 값을 가리켜야 발송되는 링크가 정상 동작합니다.
 const PIN_SITE_URL = "https://kokpass.co.kr";
+
+// ════════════════════════════════════════════════════════════
+// 솔라피(문자/카카오 알림톡) 연동 설정 — 더블에이치(HHCOMPANY) admin의 "환경설정 →
+// 솔라피 문자 발송 연동" 화면을 그대로 이식. 값은 이 브라우저(관리자 PC)의
+// localStorage에 저장되고, 발송은 /api/solapi-send · /api/solapi-upload-image
+// (Cloudflare Pages Function 프록시, HHCOMPANY와 동일 파일을 그대로 복사)를 거친다.
+// 나중에 이 admin을 다른 사업자에게 SaaS로 판매할 때도 코드 변경 없이
+// 환경설정 화면에서 그 사업자의 키만 새로 입력하면 되는 구조를 그대로 유지한다.
+// (참고: pin-admin Edge Function에도 별도의 서버측 발송 경로가 남아있음 — 두 경로가
+// 당분간 공존하며, 정리는 추후 사용자 판단으로 진행)
+const CFG = {
+  solapiKey:       localStorage.getItem('kp_sms_key') || '',
+  solapiSecret:    localStorage.getItem('kp_sms_secret') || '',
+  fromPhone:       localStorage.getItem('kp_from_phone') || '',
+  kakaoPfid:       localStorage.getItem('kp_kakao_pfid') || '',
+  kakaoTplBarcode: localStorage.getItem('kp_kakao_tpl_barcode') || '',
+};
 
 let session = null;      // {access_token, refresh_token, expires_at, user}
 let me = null;            // {id, name, role}
@@ -316,6 +339,7 @@ async function afterLogin() {
   document.getElementById("whoName").textContent = me.name;
   document.getElementById("whoRole").textContent = me.role === "admin" ? "관리자" : "스태프";
   document.getElementById("staffNavItem").style.display = me.role === "admin" ? "flex" : "none";
+  document.getElementById("msgNavItem").style.display = me.role === "admin" ? "flex" : "none";
   goTab("dashboard");
 }
 
@@ -337,13 +361,13 @@ const TAB_TITLES = {
   dashboard: "대시보드", products: "상품 관리", channels: "채널(폐쇄몰) 관리",
   orders: "주문 관리", inventory: "재고(PIN) 관리", venues: "업장 관리",
   settlements: "정산", members: "회원 목록", blog: "블로그 관리",
-  myaccount: "내 계정", staff: "관리자 계정 관리",
+  myaccount: "내 계정", staff: "관리자 계정 관리", msgsettings: "환경설정(문자·카톡)",
 };
 const TAB_RENDERERS = {
   dashboard: renderDashboard, products: renderProducts, channels: renderChannels,
   orders: renderOrders, inventory: renderInventory, venues: renderVenues,
   settlements: renderSettlements, members: renderMembers, blog: renderBlog,
-  myaccount: renderMyAccount, staff: renderStaff,
+  myaccount: renderMyAccount, staff: renderStaff, msgsettings: renderMsgSettings,
 };
 
 document.querySelectorAll(".sb-item").forEach(el => el.addEventListener("click", () => goTab(el.dataset.tab)));
@@ -395,7 +419,7 @@ async function renderDashboard() {
       restCount("orders", `?created_at=gte.${todayStr}`),
       restGet("orders", `?status=eq.paid&select=total_amount`),
       restCount("pin_inventory", `?status=eq.available`),
-      restCount("pin_inventory", `?status=eq.sold`),
+      restCount("pin_inventory", `?status=in.(sold,sent)`),
       restCount("products", `?indiv_sale_enabled=eq.true`),
       restCount("channels", `?active=eq.true`),
     ]);
@@ -423,7 +447,7 @@ async function renderDashboard() {
 
 function statusBadge(status) {
   const map = { paid: ["green", "결제완료"], pending: ["amber", "대기중"], refunded: ["red", "환불"], cancelled: ["gray", "취소"], failed: ["red", "실패"],
-                available: ["green", "판매가능"], sold: ["blue", "판매완료"], used: ["gold", "사용완료"] };
+                available: ["green", "판매가능"], sold: ["blue", "판매완료(미발송)"], sent: ["gold", "발송완료"], used: ["gray", "사용완료"] };
   const [cls, label] = map[status] || ["gray", status || "-"];
   return `<span class="badge ${cls}">${esc(label)}</span>`;
 }
@@ -1171,7 +1195,8 @@ async function renderInventory() {
       <input id="invVenue" placeholder="업장명" style="width:130px">
       <select id="invStatus">
         <option value="">전체 상태</option>
-        <option value="available">판매가능</option><option value="sold">판매완료</option>
+        <option value="available">판매가능</option><option value="sold">판매완료(미발송)</option>
+        <option value="sent">발송완료</option>
         <option value="used">사용완료</option><option value="refunded">환불</option>
       </select>
       <select id="invSent">
@@ -1214,17 +1239,17 @@ async function loadInventoryKpi() {
   const hintEl = document.getElementById("invLowStockHint");
   if (!kpiRow) return;
   try {
-    const [avail, sold, unsent, used, refunded] = await Promise.all([
+    const [avail, sold, sent, used, refunded] = await Promise.all([
       restCount("pin_inventory", "?status=eq.available"),
       restCount("pin_inventory", "?status=eq.sold"),
-      restCount("pin_inventory", "?status=eq.sold&barcode_sent=eq.false"),
+      restCount("pin_inventory", "?status=eq.sent"),
       restCount("pin_inventory", "?status=eq.used"),
       restCount("pin_inventory", "?status=eq.refunded"),
     ]);
     kpiRow.innerHTML = `
       <div class="kpi"><div class="n">${avail ?? "-"}</div><div class="l">판매가능</div></div>
-      <div class="kpi"><div class="n">${sold ?? "-"}</div><div class="l">판매완료</div></div>
-      <div class="kpi"><div class="n" style="${(unsent || 0) > 0 ? "color:var(--red);" : ""}">${unsent ?? "-"}</div><div class="l">바코드 미발송</div></div>
+      <div class="kpi"><div class="n" style="${(sold || 0) > 0 ? "color:var(--red);" : ""}">${sold ?? "-"}</div><div class="l">판매완료(미발송)</div></div>
+      <div class="kpi"><div class="n">${sent ?? "-"}</div><div class="l">발송완료</div></div>
       <div class="kpi"><div class="n">${used ?? "-"}</div><div class="l">사용완료</div></div>
       <div class="kpi"><div class="n">${refunded ?? "-"}</div><div class="l">환불</div></div>
     `;
@@ -1251,12 +1276,13 @@ async function loadInventoryTable() {
     if (invFilter.q) query += `&or=(pin_number.ilike.*${encodeURIComponent(invFilter.q)}*,buyer_name.ilike.*${encodeURIComponent(invFilter.q)}*)`;
     const rows = await restGet("pin_inventory", query);
     wrap.innerHTML = dtTable([`<input type="checkbox" id="invSelAll">`, "ID", "업장", "권종", "PIN번호", "유효기간", "상태", "발송", "구매자", "액션"], rows.map(p => {
+      const isSoldish = p.status === "sold" || p.status === "sent";
       const canSell = p.status === "available";
-      const canManage = p.status === "sold" || p.status === "used";
+      const canManage = isSoldish || p.status === "used";
       const canRestore = p.status === "used" || p.status === "refunded";
       return `
       <tr>
-        <td>${p.status === "sold" ? `<input type="checkbox" class="invRowSel" data-id="${esc(p.id)}">` : ""}</td>
+        <td>${isSoldish ? `<input type="checkbox" class="invRowSel" data-id="${esc(p.id)}">` : ""}</td>
         <td>${esc(p.id)}</td><td>${esc(p.venue_name)}</td><td>${esc(p.coupon_type)} ${esc(p.ticket_name)}</td>
         <td>${esc(p.pin_number)}</td><td>${esc(p.valid_from)} ~ ${esc(p.valid_to)}</td>
         <td>${statusBadge(p.status)}</td>
@@ -1266,7 +1292,7 @@ async function loadInventoryTable() {
           ${canSell ? `<button class="btn small primary" data-act="sell" data-id="${esc(p.id)}">판매처리</button>` : ""}
           ${canManage ? `<button class="btn small" data-act="barcode" data-id="${esc(p.id)}">바코드</button>` : ""}
           ${canManage ? `<button class="btn small" data-act="resend" data-id="${esc(p.id)}">${p.barcode_sent ? "재발송" : "발송"}</button>` : ""}
-          ${p.status === "sold" ? `<button class="btn small" data-act="used" data-id="${esc(p.id)}">사용처리</button>` : ""}
+          ${isSoldish ? `<button class="btn small" data-act="used" data-id="${esc(p.id)}">사용처리</button>` : ""}
           ${canManage ? `<button class="btn small danger" data-act="cancel" data-id="${esc(p.id)}">취소처리</button>` : ""}
           ${canRestore ? `<button class="btn small" data-act="restore" data-id="${esc(p.id)}">복구</button>` : ""}
           <button class="btn small" data-act="edit" data-id="${esc(p.id)}">편집</button>
@@ -1377,8 +1403,9 @@ async function restorePinStatus(id) {
   try {
     const row = (await restGet("pin_inventory", `?id=eq.${id}&select=*`))[0];
     if (!row) return;
-    const target = row.buyer_name ? "sold" : "available";
-    if (!confirm(`이 PIN을 "${target === "sold" ? "판매완료" : "판매가능"}" 상태로 되돌릴까요?`)) return;
+    const target = row.buyer_name ? (row.barcode_sent ? "sent" : "sold") : "available";
+    const targetLabel = { sent: "발송완료", sold: "판매완료(미발송)", available: "판매가능" }[target];
+    if (!confirm(`이 PIN을 "${targetLabel}" 상태로 되돌릴까요?`)) return;
     const patch = { status: target };
     if (row.status === "refunded") { patch.refund_reason = null; patch.refund_amount = null; patch.refunded_by = null; patch.refunded_at = null; }
     if (row.status === "used") { patch.used_at = null; }
@@ -1407,19 +1434,19 @@ function openPinSellModal(row) {
     const buyerName = document.getElementById("psName").value.trim();
     const buyerPhone = document.getElementById("psPhone").value.trim();
     if (!buyerName || !buyerPhone) { errEl.textContent = "구매자명/연락처를 입력하세요."; return; }
+    const autosend = document.getElementById("psAutosend").checked;
     try {
-      const result = await callPinAdminApi({
-        action: "sell", pinId: row.id, buyerName, buyerPhone,
-        price: document.getElementById("psPrice").value,
-        autosend: document.getElementById("psAutosend").checked,
-      });
+      const patch = {
+        status: "sold", buyer_name: buyerName, buyer_phone: buyerPhone,
+        sold_date: new Date().toISOString(),
+        price: Number(document.getElementById("psPrice").value) || 0,
+        platform: row.platform || "콕패스(수동판매)",
+      };
+      const [updated] = await restPatch("pin_inventory", `id=eq.${row.id}`, patch);
       closeModal();
-      if (result.sendResult && !result.sendResult.ok) {
-        toast(`판매처리는 완료됐지만 발송 실패: ${result.sendResult.error || "알 수 없는 오류"} (환경설정의 SOLAPI 연동을 확인하세요)`, true);
-      } else {
-        toast(result.sendResult ? "판매처리 및 바코드 발송 완료." : "판매처리 완료(발송 안 함).");
-      }
+      toast(autosend ? "판매처리 완료. 바코드를 발송합니다..." : "판매처리 완료(발송 안 함).");
       loadInventoryTable(); loadInventoryKpi();
+      if (autosend && updated) await sendBarcode(updated);
     } catch (e) { errEl.textContent = e.message; }
   });
 }
@@ -1453,13 +1480,16 @@ function openBarcodeModal(row) {
   document.getElementById("pinResendFromModalBtn").addEventListener("click", () => { closeModal(); resendBarcode(row.id); });
 }
 
+// 2026-08-28: 더블에이치(HHCOMPANY) admin과 동일하게, 발송은 이 브라우저에 저장된
+// CFG(환경설정 → 문자·카톡)를 통해 클라이언트에서 직접 처리한다(sendBarcode 참고,
+// 9번 섹션). pin-admin Edge Function(서버측 발송)은 당분간 남겨두되 이 버튼에서는
+// 더 이상 호출하지 않음 — 정리는 추후 진행.
 async function resendBarcode(id) {
   if (!confirm("바코드 링크를 문자/카카오로 (재)발송할까요?")) return;
   try {
-    const result = await callPinAdminApi({ action: "resend", pinId: id });
-    if (result.ok) toast("발송했습니다.");
-    else toast(`발송 실패: ${result.sendResult?.error || "알 수 없는 오류"}`, true);
-    loadInventoryTable(); loadInventoryKpi();
+    const row = (await restGet("pin_inventory", `?id=eq.${id}&select=*`))[0];
+    if (!row) { toast("PIN을 찾을 수 없습니다.", true); return; }
+    await sendBarcode(row);
   } catch (e) { toast("발송 실패: " + e.message, true); }
 }
 
@@ -2148,6 +2178,239 @@ function openAddStaffModal() {
       closeModal(); toast("계정을 추가했습니다."); loadStaffTable();
     } catch (e) { errEl.textContent = e.message; }
   });
+}
+
+/* ════════════════════════════════════════════════════════════
+   9. 환경설정(문자·카톡) — 더블에이치(HHCOMPANY) admin의 "환경설정 → 솔라피 문자
+   발송 연동" 화면과 발송 로직을 그대로 이식. 값은 이 브라우저의 localStorage에
+   저장되며(=이 관리자 PC에서만 유효), 발송은 콕패스 admin과 같은 도메인에 배포되는
+   /api/solapi-send · /api/solapi-upload-image (Cloudflare Pages Function, HHCOMPANY와
+   동일 파일)를 프록시로 거친다. 나중에 이 admin을 다른 사업자에게 넘길 때도 코드
+   변경 없이 이 화면에서 그 사업자의 키만 새로 입력하면 되는 구조를 그대로 유지.
+   ════════════════════════════════════════════════════════════ */
+function renderMsgSettings() {
+  const main = document.getElementById("main");
+  if (me.role !== "admin") { main.innerHTML = `<div class="empty">관리자만 접근할 수 있습니다.</div>`; return; }
+  main.innerHTML = `
+    <div class="panel">
+      <div class="panel-head"><h2>솔라피 문자 발송 연동</h2></div>
+      <div class="hint" style="margin-bottom:12px">여기 입력한 값은 <strong>이 브라우저(이 컴퓨터)</strong>에만 저장됩니다. 다른 관리자 PC에서 발송하려면 그 PC에서도 한 번 입력해야 합니다.</div>
+      <div class="row2">
+        <div class="field"><label>API Key</label><input id="cfgSapi" type="password" value="${esc(CFG.solapiKey)}" placeholder="솔라피 콘솔 → 개발 → API Key 관리"></div>
+        <div class="field"><label>API Secret</label><input id="cfgSsecret" type="password" value="${esc(CFG.solapiSecret)}" placeholder="API Secret"></div>
+      </div>
+      <div class="field"><label>발신번호</label><input id="cfgFrom" value="${esc(CFG.fromPhone)}" placeholder="01012345678 (숫자만, 솔라피에 등록된 번호)" style="max-width:220px"></div>
+
+      <div class="hint" style="margin:16px 0 10px;border-top:1px solid var(--border);padding-top:12px">
+        💬 <strong>카카오 알림톡(선택)</strong> — 카카오 채널 연동 후 발급받은 값을 입력하세요. 비워두면 문자(SMS) 또는 MMS(바코드 이미지)로 대체 발송됩니다.
+      </div>
+      <div class="row2">
+        <div class="field"><label>발신 프로필 키(PFID)</label><input id="cfgPfid" value="${esc(CFG.kakaoPfid)}" placeholder="솔라피 콘솔 → 카카오 채널 연동 시 발급"></div>
+        <div class="field"><label>템플릿 ID (입장권 바코드)</label><input id="cfgTplBarcode" value="${esc(CFG.kakaoTplBarcode)}" placeholder="검수 통과된 바코드 링크(텍스트형) 템플릿 ID"></div>
+      </div>
+
+      <div class="modal-actions" style="justify-content:flex-start;margin-top:16px">
+        <button class="btn" id="testSmsBtn">테스트 발송</button>
+        <button class="btn primary" id="saveSmsBtn">저장</button>
+      </div>
+      <div class="hint" style="margin-top:14px">
+        1) solapi.com 회원가입 → 사업자 인증 · 2) 발신번호 등록 + API Key/Secret 발급 ·
+        3) (알림톡) 카카오 채널 연동 → PFID 발급 · 4) (알림톡) 템플릿 등록 → 검수 후 템플릿 ID 입력
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>연결 상태</h2></div>
+      <div class="row2">
+        <div>솔라피 문자</div><div id="cfgSmsStatus">${msgConnStatusBadge()}</div>
+      </div>
+    </div>
+  `;
+  document.getElementById("saveSmsBtn").addEventListener("click", saveSmsConfig);
+  document.getElementById("testSmsBtn").addEventListener("click", testSmsConn);
+}
+
+function msgConnStatusBadge() {
+  const smsOk = !!(CFG.solapiKey && CFG.solapiSecret && CFG.fromPhone);
+  const kakaoOk = smsOk && !!CFG.kakaoPfid;
+  if (!smsOk) return `<span class="badge gray">미연결</span>`;
+  return kakaoOk ? `<span class="badge green">솔라피+알림톡 연결됨</span>` : `<span class="badge green">솔라피 연결됨</span>`;
+}
+
+function saveSmsConfig() {
+  CFG.solapiKey = document.getElementById("cfgSapi").value.trim();
+  CFG.solapiSecret = document.getElementById("cfgSsecret").value.trim();
+  CFG.fromPhone = document.getElementById("cfgFrom").value.trim();
+  CFG.kakaoPfid = document.getElementById("cfgPfid").value.trim();
+  CFG.kakaoTplBarcode = document.getElementById("cfgTplBarcode").value.trim();
+  localStorage.setItem("kp_sms_key", CFG.solapiKey);
+  localStorage.setItem("kp_sms_secret", CFG.solapiSecret);
+  localStorage.setItem("kp_from_phone", CFG.fromPhone);
+  localStorage.setItem("kp_kakao_pfid", CFG.kakaoPfid);
+  localStorage.setItem("kp_kakao_tpl_barcode", CFG.kakaoTplBarcode);
+  const statusEl = document.getElementById("cfgSmsStatus");
+  if (statusEl) statusEl.innerHTML = msgConnStatusBadge();
+  toast("솔라피 설정을 저장했습니다.");
+}
+
+async function testSmsConn() {
+  if (!CFG.solapiKey) { toast("솔라피 API Key를 먼저 저장해주세요.", true); return; }
+  const phone = CFG.fromPhone || document.getElementById("cfgFrom")?.value;
+  if (!phone) { toast("발신번호를 입력해주세요.", true); return; }
+  toast("테스트 문자 발송을 시도합니다...");
+  await sendSolapiSms(phone, "[콕패스] 솔라피 연결 테스트 문자입니다.");
+}
+
+// ── 솔라피 SMS 발송 — 브라우저에서 api.solapi.com을 직접 호출하면 CORS에 막히므로,
+//    같은 도메인의 서버리스 프록시(/api/solapi-send)를 통해 발송한다.
+async function sendSolapiSms(to, text) {
+  if (!CFG.solapiKey || !CFG.solapiSecret) {
+    toast("솔라피 설정이 필요합니다. 환경설정(문자·카톡)을 확인해주세요.", true);
+    return false;
+  }
+  try {
+    const res = await fetch("/api/solapi-send", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        apiKey: CFG.solapiKey, apiSecret: CFG.solapiSecret,
+        message: { to: to.replace(/-/g, ""), from: CFG.fromPhone.replace(/-/g, ""), text },
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) { toast(`문자 발송 완료 (${to})`); return true; }
+    toast(`발송 실패: ${data.errorMessage || data.message || JSON.stringify(data)}`, true);
+    return false;
+  } catch (e) { toast("발송 오류: " + e.message, true); return false; }
+}
+
+// ── PIN 번호를 Code128 PNG(JPEG)로 렌더링 — MMS 이미지 첨부용.
+//    카카오 알림톡 이미지첨부형 규격(800x400, 2:1)에 맞춘 고정 캔버스, 200KB 이하로 압축.
+function renderBarcodePng(value) {
+  return new Promise((resolve, reject) => {
+    try {
+      const svg = document.getElementById("hiddenBarcodeSvg");
+      JsBarcode(svg, value, { format: "CODE128", width: 3, height: 140, displayValue: true, fontSize: 28, margin: 10 });
+      const svgData = new XMLSerializer().serializeToString(svg);
+      const svgBlob = new Blob([svgData], { type: "image/svg+xml;charset=utf-8" });
+      const url = URL.createObjectURL(svgBlob);
+      const img = new Image();
+      img.onload = () => {
+        const CW = 800, CH = 400;
+        const canvas = document.createElement("canvas");
+        canvas.width = CW; canvas.height = CH;
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, CW, CH);
+        const pad = 40;
+        const scale = Math.min((CW - pad * 2) / img.width, (CH - pad * 2) / img.height);
+        const drawW = img.width * scale, drawH = img.height * scale;
+        ctx.drawImage(img, (CW - drawW) / 2, (CH - drawH) / 2, drawW, drawH);
+        URL.revokeObjectURL(url);
+        let dataUrl = canvas.toDataURL("image/jpeg", 0.92);
+        if (dataUrl.length * 0.75 > 200 * 1024) dataUrl = canvas.toDataURL("image/jpeg", 0.7);
+        resolve(dataUrl.split(",")[1]);
+      };
+      img.onerror = () => reject(new Error("바코드 이미지 렌더링 실패"));
+      img.src = url;
+    } catch (e) { reject(e); }
+  });
+}
+
+// 발송이력 기록(message_log). 실패해도 발송 자체 흐름에는 영향을 주지 않는다.
+async function logMessage({ pinId, orderId, pinNumber, venueName, phone, channel, content, ok, error }) {
+  try {
+    await restInsert("message_log", [{
+      pin_id: pinId || null, order_id: orderId || null, pin_number: pinNumber || null,
+      venue_name: venueName || null, recipient_phone: phone || null, channel: channel || null,
+      content: content || null, status: ok ? "success" : "failed", error_message: error || null,
+      sent_by: me?.name || "admin",
+    }]);
+  } catch (e) { console.warn("발송이력 기록 실패(무시):", e.message); }
+}
+
+// PIN 바코드 발송 — 카카오 알림톡(텍스트+링크) → MMS(이미지) → SMS 순으로 자동 대체.
+// 더블에이치 admin의 sendBarcode()와 동일한 3단계 구조를 그대로 이식.
+async function sendBarcode(p) {
+  if (!p.buyer_phone) { toast("구매자 연락처가 없습니다.", true); return; }
+  if (!CFG.solapiKey || !CFG.solapiSecret || !CFG.fromPhone) {
+    toast("문자 발송 설정이 필요합니다 (환경설정 → 문자·카톡).", true);
+    return;
+  }
+  const caption = `[콕패스] ${p.venue_name} 입장권\n유효기간: ${p.valid_from || ""} ~ ${p.valid_to || ""}\n현장에서 이 바코드를 제시해주세요.`;
+
+  // 1) 카카오 알림톡(텍스트+링크형) 우선 시도 — 템플릿 ID가 설정되어 있으면 사용
+  if (CFG.kakaoPfid && CFG.kakaoTplBarcode) {
+    try {
+      const ticketUrl = `${PIN_SITE_URL}/ticket.html?pin=${encodeURIComponent(p.pin_number)}`;
+      const sendRes = await fetch("/api/solapi-send", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          apiKey: CFG.solapiKey, apiSecret: CFG.solapiSecret,
+          message: {
+            to: p.buyer_phone.replace(/-/g, ""), from: CFG.fromPhone.replace(/-/g, ""),
+            kakaoOptions: {
+              pfId: CFG.kakaoPfid, templateId: CFG.kakaoTplBarcode,
+              variables: {
+                "#{업장명}": p.venue_name || "", "#{구매자명}": p.buyer_name || "고객",
+                "#{유효기간}": `${p.valid_from || ""} ~ ${p.valid_to || ""}`,
+                "#{바코드번호}": p.pin_number, "#{링크}": ticketUrl,
+              },
+              disableSms: false,
+            },
+          },
+        }),
+      });
+      if (sendRes.ok) {
+        toast(`${p.pin_number} 알림톡(바코드 링크) 발송 완료`);
+        await finishBarcodeSend(p);
+        await logMessage({ pinId: p.id, orderId: p.order_id, pinNumber: p.pin_number, venueName: p.venue_name, phone: p.buyer_phone, channel: "kakao", content: caption, ok: true });
+        return;
+      }
+      const errData = await sendRes.json().catch(() => ({}));
+      await logMessage({ pinId: p.id, orderId: p.order_id, pinNumber: p.pin_number, venueName: p.venue_name, phone: p.buyer_phone, channel: "kakao", content: caption, ok: false, error: errData.errorMessage || errData.message || "send failed" });
+    } catch (e) {
+      await logMessage({ pinId: p.id, orderId: p.order_id, pinNumber: p.pin_number, venueName: p.venue_name, phone: p.buyer_phone, channel: "kakao", content: caption, ok: false, error: e.message });
+    }
+  }
+
+  // 2) 알림톡 미설정/실패 시 MMS(이미지 첨부)로 대체
+  let mmsOk = false;
+  try {
+    const base64 = await renderBarcodePng(p.pin_number);
+    const upRes = await fetch("/api/solapi-upload-image", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apiKey: CFG.solapiKey, apiSecret: CFG.solapiSecret, fileBase64: base64, fileName: `barcode_${p.pin_number}.jpg` }),
+    });
+    const upData = await upRes.json().catch(() => ({}));
+    if (upRes.ok && upData.fileId) {
+      const sendRes = await fetch("/api/solapi-send", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          apiKey: CFG.solapiKey, apiSecret: CFG.solapiSecret,
+          message: { to: p.buyer_phone.replace(/-/g, ""), from: CFG.fromPhone.replace(/-/g, ""), type: "MMS", subject: `${p.venue_name} 입장권`, text: caption, imageId: upData.fileId },
+        }),
+      });
+      mmsOk = sendRes.ok;
+    }
+  } catch (e) { /* 아래에서 문자로 대체 */ }
+
+  if (mmsOk) {
+    toast(`${p.pin_number} 바코드 이미지(MMS) 발송 완료`);
+    await finishBarcodeSend(p);
+    await logMessage({ pinId: p.id, orderId: p.order_id, pinNumber: p.pin_number, venueName: p.venue_name, phone: p.buyer_phone, channel: "mms", content: caption, ok: true });
+    return;
+  }
+
+  // 3) 알림톡·MMS 모두 실패 시 일반 문자로 최종 대체
+  const fallbackMsg = `${caption}\n\n바코드번호: ${p.pin_number}`;
+  const ok = await sendSolapiSms(p.buyer_phone, fallbackMsg);
+  await logMessage({ pinId: p.id, orderId: p.order_id, pinNumber: p.pin_number, venueName: p.venue_name, phone: p.buyer_phone, channel: "sms", content: fallbackMsg, ok, error: ok ? null : "sms send failed" });
+  if (ok) await finishBarcodeSend(p);
+}
+
+async function finishBarcodeSend(p) {
+  try {
+    await restPatch("pin_inventory", `id=eq.${p.id}`, { status: "sent", barcode_sent: true, sent_at: new Date().toISOString() });
+  } catch (e) { /* 발송은 이미 성공했으므로 상태 갱신 실패는 조용히 무시 */ }
+  loadInventoryTable(); loadInventoryKpi();
 }
 
 /* ════════════════════════════════════════════════════════════
